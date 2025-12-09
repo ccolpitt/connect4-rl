@@ -8,6 +8,7 @@ This script demonstrates:
 4. Detecting winners
 5. Rendering the board
 """
+# %%
 
 import sys
 from pathlib import Path
@@ -15,7 +16,10 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
+# %%
 from environment import Config, ConnectFourEnvironment
+
+# %%
 
 
 def example_game():
@@ -70,6 +74,8 @@ def example_game():
     print(f"   Game over: {env.is_terminal()}")
     print(f"   Legal moves remaining: {env.get_legal_moves()}")
 
+
+# %%
 
 def example_state_manipulation():
     """Demonstrate state manipulation features."""
@@ -155,3 +161,4 @@ if __name__ == '__main__':
     print("\n" + "=" * 50)
     print("Examples completed successfully!")
     print("=" * 50)
+# %%
