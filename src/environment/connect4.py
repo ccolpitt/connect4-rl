@@ -63,27 +63,47 @@ class ConnectFourEnvironment:
     
     def get_state(self) -> np.ndarray:
         """
-        Get current state as 3-channel tensor for neural network input.
+        Get current state from current player's perspective.
+        
+        CRITICAL: For self-play, the agent must always see the board from its own
+        perspective, with its pieces in Channel 0 and opponent's in Channel 1.
         
         Returns:
             np.ndarray: State tensor of shape (3, ROWS, COLS) in (C, H, W) format
-                - Channel 0: Player 1 pieces (binary mask)
-                - Channel 1: Player 2 pieces (binary mask)
-                - Channel 2: Current player plane (1.0 for P1, 0.0 for P2)
+                - Channel 0: Current player's pieces (MY pieces)
+                - Channel 1: Opponent's pieces (THEIR pieces)
+                - Channel 2: Always 1.0 (indicates "my turn")
+        """
+        return self.get_state_from_perspective(self.current_player)
+    
+    def get_state_from_perspective(self, player: int) -> np.ndarray:
+        """
+        Get state from specified player's perspective.
+        
+        This ensures the agent always sees:
+        - Channel 0: Its own pieces
+        - Channel 1: Opponent's pieces
+        - Channel 2: Always 1.0 (my turn indicator)
+        
+        Args:
+            player: Player to get perspective for (1 or -1)
+        
+        Returns:
+            np.ndarray: State from player's perspective (3, ROWS, COLS)
         """
         state = np.zeros((3, self.rows, self.cols), dtype=np.float32)
         
-        # Channel 0: Player 1 pieces
-        state[0, :, :] = (self.board == self.config.PLAYER_1).astype(np.float32)
-        
-        # Channel 1: Player 2 pieces
-        state[1, :, :] = (self.board == self.config.PLAYER_2).astype(np.float32)
-        
-        # Channel 2: Current player plane
-        if self.current_player == self.config.PLAYER_1:
-            state[2, :, :] = 1.0
+        if player == self.config.PLAYER_1:
+            # Player 1's perspective
+            state[0, :, :] = (self.board == self.config.PLAYER_1).astype(np.float32)  # My pieces
+            state[1, :, :] = (self.board == self.config.PLAYER_2).astype(np.float32)  # Opponent's pieces
         else:
-            state[2, :, :] = 0.0
+            # Player 2's perspective (flipped)
+            state[0, :, :] = (self.board == self.config.PLAYER_2).astype(np.float32)  # My pieces
+            state[1, :, :] = (self.board == self.config.PLAYER_1).astype(np.float32)  # Opponent's pieces
+        
+        # Channel 2: Always 1.0 to indicate "my turn"
+        state[2, :, :] = 1.0
         
         return state
     
@@ -135,9 +155,9 @@ class ConnectFourEnvironment:
         
         Returns:
             Tuple containing:
-                - state (np.ndarray): New state after move
-                - reward (float or None): Reward for the move (1.0 for win, -1.0 for loss, 
-                  0.0 for draw, None if game continues)
+                - state (np.ndarray): New state from NEXT player's perspective
+                - reward (float or None): Reward from PREVIOUS player's perspective
+                  (+1.0 for win, -1.0 for loss, 0.0 for draw, None if game continues)
                 - done (bool): Whether the game has ended
         
         Raises:
@@ -148,6 +168,9 @@ class ConnectFourEnvironment:
         
         if self.board[0, col] != 0:
             raise ValueError(f"Column {col} is full!")
+        
+        # Store who made this move (before switching players)
+        moving_player = self.current_player
         
         # Make the move (drop piece to lowest available row)
         for row in reversed(range(self.rows)):
@@ -161,17 +184,20 @@ class ConnectFourEnvironment:
         legal_moves = self.get_legal_moves()
         done = winner is not None or len(legal_moves) == 0
         
-        # Determine reward (from perspective of player who just moved)
+        # Determine reward from perspective of player who just moved
         if winner is not None:
-            reward = winner  # Winner gets +1 or -1
+            # If there's a winner, it must be the player who just moved
+            # Reward is +1.0 for winning, -1.0 for losing
+            reward = +1.0 if winner == moving_player else -1.0
         elif len(legal_moves) == 0:
-            reward = self.config.DRAW_VALUE  # Draw
+            reward = self.config.DRAW_VALUE  # Draw (0.0)
         else:
             reward = None  # Game continues, no reward yet
         
         # Switch to next player
         self.current_player *= -1
         
+        # Return state from NEXT player's perspective
         return self.get_state(), reward, done
     
     def apply_move_to_state(self, state: np.ndarray, action: int, 
