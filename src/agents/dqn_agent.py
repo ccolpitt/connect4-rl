@@ -34,9 +34,10 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 import copy
 
-from agents.base_agent import BaseAgent
-from networks.dqn_value_network import DQNValueNetwork
-from utils.dqn_replay_buffer import DQNReplayBuffer
+from src.agents.base_agent import BaseAgent
+from src.networks.dqn_value_network import DQNValueNetwork
+from src.utils.dqn_replay_buffer import DQNReplayBuffer
+from src.utils.prioritized_replay_buffer import PrioritizedReplayBuffer
 
 
 class DQNAgent(BaseAgent):
@@ -106,8 +107,15 @@ class DQNAgent(BaseAgent):
         buffer_size: int = 100000,
         batch_size: int = 64,
         min_buffer_size: int = 1000,
+        # Prioritized replay parameters
+        use_prioritized_replay: bool = False,
+        priority_alpha: float = 0.6,  # How much prioritization (0=uniform, 1=full)
+        priority_beta_start: float = 0.4,  # Importance sampling (annealed to 1.0)
+        priority_beta_frames: int = 100000,  # Frames to anneal beta
         # Target network parameters
         target_update_freq: int = 1000,
+        use_polyak: bool = False,  # Use Polyak averaging for target network
+        polyak_tau: float = 0.005,  # Polyak averaging coefficient (0.001-0.01)
         # Double DQN
         use_double_dqn: bool = True,
         # Device
@@ -140,8 +148,16 @@ class DQNAgent(BaseAgent):
             batch_size: Experiences per training step (64 = good default)
             min_buffer_size: Minimum experiences before training (1000 = warmup)
             
+            Prioritized Replay Parameters:
+            use_prioritized_replay: Use prioritized experience replay (PER)
+            priority_alpha: Prioritization exponent (0=uniform, 1=full priority). Typical: 0.6-0.7
+            priority_beta_start: Initial importance sampling (annealed to 1.0). Typical: 0.4
+            priority_beta_frames: Frames to anneal beta to 1.0
+            
             Target Network Parameters:
-            target_update_freq: Steps between target network updates (1000 = stable)
+            target_update_freq: Steps between hard target updates (only used if not using Polyak)
+            use_polyak: Use Polyak (soft) averaging instead of hard updates
+            polyak_tau: Polyak coefficient (τ). Target = τ*Q + (1-τ)*Target. Typical: 0.001-0.01
             
             Algorithm Variants:
             use_double_dqn: Use Double DQN to reduce overestimation bias
@@ -185,16 +201,27 @@ class DQNAgent(BaseAgent):
         )
         
         # Loss function
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.MSELoss(reduction='none')  # Per-sample loss for PER
         
-        # Replay buffer
-        self.replay_buffer = DQNReplayBuffer(capacity=buffer_size)
+        # Replay buffer (standard or prioritized)
+        self.use_prioritized_replay = use_prioritized_replay
+        if use_prioritized_replay:
+            self.replay_buffer = PrioritizedReplayBuffer(
+                capacity=buffer_size,
+                alpha=priority_alpha,
+                beta_start=priority_beta_start,
+                beta_frames=priority_beta_frames
+            )
+        else:
+            self.replay_buffer = DQNReplayBuffer(capacity=buffer_size)
         
         # Hyperparameters
         self.gamma = gamma
         self.batch_size = batch_size
         self.min_buffer_size = min_buffer_size
         self.target_update_freq = target_update_freq
+        self.use_polyak = use_polyak
+        self.polyak_tau = polyak_tau
         self.use_double_dqn = use_double_dqn
         
         # Exploration parameters
@@ -210,30 +237,71 @@ class DQNAgent(BaseAgent):
         self.recent_loss = 0.0
         self.recent_q = 0.0
     
-    def select_action(self, state: np.ndarray, legal_moves: List[int]) -> int:
+    def select_action(self, state: np.ndarray, legal_moves: List[int], use_softmax: bool = True, temperature: float = 1.0) -> int:
         """
-        Select action using ε-greedy policy.
+        Select action using softmax sampling (training) or greedy (evaluation).
         
-        With probability ε: choose random legal action (exploration)
-        With probability 1-ε: choose action with highest Q-value (exploitation)
+        Training mode (use_softmax=True):
+            Sample from softmax distribution over Q-values for better exploration
+        
+        Evaluation mode (use_softmax=False):
+            Choose action with highest Q-value (greedy)
         
         Args:
             state: Current game state, shape (3, 6, 7)
             legal_moves: List of valid column indices
+            use_softmax: If True, sample from softmax; if False, use argmax
+            temperature: Softmax temperature (higher = more exploration)
         
         Returns:
             action: Selected column index (0-6)
         """
-        # Exploration: random action
-        if np.random.random() < self.epsilon:
-            return np.random.choice(legal_moves)
+        if use_softmax:
+            return self._sample_softmax_action(state, legal_moves, temperature)
+        else:
+            return self._get_best_action(state, legal_moves)
+    
+    def _sample_softmax_action(self, state: np.ndarray, legal_moves: List[int], temperature: float = 1.0) -> int:
+        """
+        Sample action from softmax distribution over Q-values.
         
-        # Exploitation: best action according to Q-network
-        return self._get_best_action(state, legal_moves)
+        This provides better exploration than epsilon-greedy by:
+        1. Considering all legal actions (not just random vs best)
+        2. Probability proportional to Q-value (better actions more likely)
+        3. Temperature controls exploration (higher = more uniform)
+        
+        Args:
+            state: Current game state, shape (3, 6, 7)
+            legal_moves: List of valid column indices
+            temperature: Softmax temperature (default 1.0)
+        
+        Returns:
+            action: Sampled column index
+        """
+        self.q_network.eval()
+        with torch.no_grad():
+            # Convert state to tensor
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            
+            # Get Q-values for all actions
+            q_values = self.q_network(state_tensor).cpu().numpy()[0]
+            
+            # Get Q-values for legal moves only
+            legal_q_values = q_values[legal_moves]
+            
+            # Apply softmax with temperature
+            # Higher temperature = more uniform distribution (more exploration)
+            # Lower temperature = more peaked distribution (more exploitation)
+            exp_q = np.exp((legal_q_values - np.max(legal_q_values)) / temperature)
+            probabilities = exp_q / np.sum(exp_q)
+            
+            # Sample action according to probabilities
+            action_idx = np.random.choice(len(legal_moves), p=probabilities)
+            return legal_moves[action_idx]
     
     def _get_best_action(self, state: np.ndarray, legal_moves: List[int]) -> int:
         """
-        Get action with highest Q-value among legal moves.
+        Get action with highest Q-value among legal moves (greedy).
         
         Args:
             state: Current game state, shape (3, 6, 7)
@@ -287,11 +355,13 @@ class DQNAgent(BaseAgent):
         Perform one training step using experience replay.
         
         Algorithm:
-        1. Sample batch from replay buffer
+        1. Sample batch from replay buffer (prioritized or uniform)
         2. Compute Q-learning targets: y = r + γ * max_a' Q_target(s', a')
         3. Compute loss: MSE(Q(s,a), y)
-        4. Backpropagate and update Q-network
-        5. Update target network periodically
+        4. Apply importance sampling weights (if using PER)
+        5. Backpropagate and update Q-network
+        6. Update priorities (if using PER)
+        7. Update target network (hard copy or Polyak)
         
         Returns:
             Dictionary with training metrics (loss, q_values, etc.)
@@ -302,7 +372,13 @@ class DQNAgent(BaseAgent):
             return None
         
         # Sample batch from replay buffer
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+        if self.use_prioritized_replay:
+            (states, actions, rewards, next_states, dones), indices, weights = self.replay_buffer.sample(self.batch_size)
+            weights = torch.FloatTensor(weights).to(self.device)
+        else:
+            states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+            indices = None
+            weights = None
         
         # Convert to tensors
         states = torch.FloatTensor(states).to(self.device)
@@ -331,8 +407,17 @@ class DQNAgent(BaseAgent):
             # Compute targets: y = r + γ * max_a' Q_target(s', a') if not done, else r
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
-        # Compute loss
-        loss = self.criterion(current_q_values, target_q_values)
+        # Compute TD-errors (for prioritized replay)
+        td_errors = target_q_values - current_q_values
+        
+        # Compute loss (per-sample)
+        loss_per_sample = self.criterion(current_q_values, target_q_values)
+        
+        # Apply importance sampling weights if using prioritized replay
+        if self.use_prioritized_replay:
+            loss = (loss_per_sample * weights).mean()
+        else:
+            loss = loss_per_sample.mean()
         
         # Optimize
         self.optimizer.zero_grad()
@@ -341,9 +426,18 @@ class DQNAgent(BaseAgent):
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=10.0)
         self.optimizer.step()
         
-        # Update target network periodically
+        # Update priorities if using prioritized replay
+        if self.use_prioritized_replay:
+            td_errors_np = td_errors.detach().cpu().numpy()
+            self.replay_buffer.update_priorities(indices, td_errors_np)
+        
+        # Update target network
         self.train_steps += 1
-        if self.train_steps % self.target_update_freq == 0:
+        if self.use_polyak:
+            # Polyak (soft) update every step
+            self._polyak_update()
+        elif self.train_steps % self.target_update_freq == 0:
+            # Hard update periodically
             self.target_network.load_state_dict(self.q_network.state_dict())
         
         # Track statistics
@@ -369,6 +463,23 @@ class DQNAgent(BaseAgent):
         """
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
         self.episodes_completed += 1
+    
+    def _polyak_update(self) -> None:
+        """
+        Perform Polyak (soft) update of target network.
+        
+        Updates target network parameters using:
+            θ_target = τ * θ_q + (1 - τ) * θ_target
+        
+        This provides smoother updates than hard copying, leading to:
+        - More stable Q-value estimates
+        - Less oscillation in learning
+        - Better convergence properties
+        """
+        for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
+            target_param.data.copy_(
+                self.polyak_tau * param.data + (1.0 - self.polyak_tau) * target_param.data
+            )
     
     def set_exploration(self, exploration_rate: float) -> None:
         """

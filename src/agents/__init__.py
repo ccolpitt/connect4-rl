@@ -30,7 +30,8 @@ Why use __all__?
 from .base_agent import BaseAgent
 from .random_agent import RandomAgent
 from .dqn_agent import DQNAgent
+from .a2c_agent import A2CAgent
 
 # This list defines what gets exported when someone imports from this module
 # Only classes/functions listed here will be available via "from agents import *"
-__all__ = ['BaseAgent', 'RandomAgent', 'DQNAgent']
+__all__ = ['BaseAgent', 'RandomAgent', 'DQNAgent', 'A2CAgent']
