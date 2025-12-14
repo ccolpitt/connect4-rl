@@ -152,14 +152,20 @@ class ConnectFourEnvironment:
         """
         Execute a move in the specified column.
         
+        CRITICAL FOR CANONICAL REPRESENTATION:
+        - state: From moving player's perspective (before move)
+        - next_state: From next player's perspective (after move, flipped)
+        - reward: From moving player's perspective (+1 win, -1 loss, 0 continue/draw)
+        
         Args:
             col: Column index (0 to COLS-1)
         
         Returns:
             Tuple containing:
-                - state (np.ndarray): New state from NEXT player's perspective
-                - reward (float): Reward from PREVIOUS player's perspective
-                  (+1.0 for win, -1.0 for loss, 0.0 for draw or continuing game)
+                - next_state (np.ndarray): State from NEXT player's perspective (flipped)
+                - reward (float): Reward from MOVING player's perspective
+                  (+1.0 for win, 0.0 for draw/continue)
+                  Note: Moving player can never lose on their own turn
                 - done (bool): Whether the game has ended
         
         Raises:
@@ -187,10 +193,10 @@ class ConnectFourEnvironment:
         done = winner is not None or len(legal_moves) == 0
         
         # Determine reward from perspective of player who just moved
+        # IMPORTANT: Moving player can only win or draw on their turn, never lose
         if winner is not None:
-            # If there's a winner, it must be the player who just moved
-            # Reward is +1.0 for winning, -1.0 for losing
-            reward = +1.0 if winner == moving_player else -1.0
+            # Winner must be the moving player (you can't make a move that makes opponent win)
+            reward = +1.0
         elif len(legal_moves) == 0:
             reward = self.config.DRAW_VALUE  # Draw (0.0)
         else:
@@ -199,7 +205,8 @@ class ConnectFourEnvironment:
         # Switch to next player
         self.current_player *= -1
         
-        # Return state from NEXT player's perspective
+        # Return state from NEXT player's perspective (canonical flipping)
+        # This ensures the agent always sees "my pieces" in Channel 0
         return self.get_state(), reward, done
     
     def apply_move_to_state(self, state: np.ndarray, action: int,

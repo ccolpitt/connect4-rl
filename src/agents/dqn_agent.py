@@ -1,30 +1,42 @@
 """
-DQN Agent - Deep Q-Network for Connect 4
+DQN Agent - Deep Q-Network for Connect 4 with Negamax
 
 This module implements a DQN (Deep Q-Network) agent that learns to play Connect 4
-through Q-learning with experience replay and target networks.
+through Q-learning with experience replay, target networks, and negamax updates.
 
 Key Concepts:
 -------------
 1. **Q-Learning**: Learn Q(s,a) = expected future reward for taking action a in state s
 2. **Experience Replay**: Store and sample past experiences to break temporal correlation
 3. **Target Network**: Use a separate, slowly-updated network for stable learning
-4. **ε-Greedy Exploration**: Balance exploration (random) vs exploitation (best known action)
+4. **Negamax**: Account for alternating players in two-player zero-sum games
+5. **Canonical Representation**: Network always sees board from "my" perspective
 
-DQN Algorithm:
---------------
-1. Select action using ε-greedy policy (explore vs exploit)
-2. Execute action, observe reward and next state
+Negamax DQN Algorithm:
+----------------------
+1. Select action using softmax/greedy policy
+2. Execute action, observe reward and next state (flipped to opponent's perspective)
 3. Store experience (s, a, r, s', done) in replay buffer
 4. Sample random batch from replay buffer
-5. Compute target: y = r + γ * max_a' Q_target(s', a') if not done, else r
+5. Compute target: y = r - γ * max_a' Q_target(s', a') if not done, else r
+   NOTE: Negative sign because s' is from opponent's perspective
 6. Update Q-network to minimize: (Q(s,a) - y)²
 7. Periodically update target network: Q_target ← Q
 
+Why Negamax?
+------------
+In two-player zero-sum games with canonical representation:
+- s: My perspective (my pieces in Channel 0)
+- s': Opponent's perspective (their pieces in Channel 0)
+- Q(s,a): My expected value
+- Q(s',a'): Opponent's expected value = -My expected value
+- Therefore: My value = r - γ * max Q(s',a') (not +)
+
 References:
 -----------
-- Original DQN paper: Mnih et al. (2015) "Human-level control through deep RL"
+- Original DQN: Mnih et al. (2015) "Human-level control through deep RL"
 - Double DQN: van Hasselt et al. (2016) "Deep RL with Double Q-learning"
+- Negamax: Standard technique in two-player game AI
 """
 
 import torch
@@ -178,9 +190,9 @@ class DQNAgent(BaseAgent):
         else:
             self.device = torch.device(device)
         
-        # Create Q-network and target network
+        # Create Q-network and target network (2 channels for canonical representation)
         self.q_network = DQNValueNetwork(
-            input_channels=3,
+            input_channels=2,
             num_actions=7,
             conv_channels=conv_channels,
             fc_dims=fc_dims,
@@ -248,7 +260,7 @@ class DQNAgent(BaseAgent):
             Choose action with highest Q-value (greedy)
         
         Args:
-            state: Current game state, shape (3, 6, 7)
+            state: Current game state, shape (2, 6, 7)
             legal_moves: List of valid column indices
             use_softmax: If True, sample from softmax; if False, use argmax
             temperature: Softmax temperature (higher = more exploration)
@@ -271,7 +283,7 @@ class DQNAgent(BaseAgent):
         3. Temperature controls exploration (higher = more uniform)
         
         Args:
-            state: Current game state, shape (3, 6, 7)
+            state: Current game state, shape (2, 6, 7)
             legal_moves: List of valid column indices
             temperature: Softmax temperature (default 1.0)
         
@@ -304,7 +316,7 @@ class DQNAgent(BaseAgent):
         Get action with highest Q-value among legal moves (greedy).
         
         Args:
-            state: Current game state, shape (3, 6, 7)
+            state: Current game state, shape (2, 6, 7)
             legal_moves: List of valid column indices
         
         Returns:
@@ -337,10 +349,10 @@ class DQNAgent(BaseAgent):
         Store experience in replay buffer.
         
         Args:
-            state: State before action, shape (3, 6, 7)
+            state: State before action, shape (2, 6, 7)
             action: Action taken (column index 0-6)
             reward: Reward received (1.0 win, -1.0 loss, 0.0 draw/continuing)
-            next_state: State after action, shape (3, 6, 7)
+            next_state: State after action, shape (2, 6, 7) from opponent's perspective
             done: Whether game ended
         """
         # Add to replay buffer
@@ -350,9 +362,10 @@ class DQNAgent(BaseAgent):
         """
         Perform one training step using experience replay.
         
-        Algorithm:
+        Algorithm (Negamax):
         1. Sample batch from replay buffer (prioritized or uniform, or specific indices)
-        2. Compute Q-learning targets: y = r + γ * max_a' Q_target(s', a')
+        2. Compute negamax targets: y = r - γ * max_a' Q_target(s', a')
+           NOTE: Negative sign because s' is from opponent's perspective
         3. Compute loss: MSE(Q(s,a), y)
         4. Apply importance sampling weights (if using PER)
         5. Backpropagate and update Q-network
@@ -413,8 +426,9 @@ class DQNAgent(BaseAgent):
                 # Standard DQN: use target network for both selection and evaluation
                 next_q_values = self.target_network(next_states).max(dim=1)[0]
             
-            # Compute targets: y = r + γ * max_a' Q_target(s', a') if not done, else r
-            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+            # Compute negamax targets: y = r - γ * max_a' Q_target(s', a') if not done, else r
+            # Negative sign because next_state is from opponent's perspective
+            target_q_values = rewards - (1 - dones) * self.gamma * next_q_values
         
         # Compute TD-errors (for prioritized replay)
         td_errors = target_q_values - current_q_values
@@ -567,7 +581,7 @@ class DQNAgent(BaseAgent):
         Useful for debugging and auditing to see what the network predicts.
         
         Args:
-            state: Game state, shape (3, 6, 7)
+            state: Game state, shape (2, 6, 7)
         
         Returns:
             Q-values for all 7 actions, shape (7,)
@@ -599,10 +613,10 @@ class DQNAgent(BaseAgent):
         Useful for debugging to ensure the network is learning correctly.
         
         Args:
-            state: State before action, shape (3, 6, 7)
+            state: State before action, shape (2, 6, 7)
             action: Action taken (column index 0-6)
             reward: Reward received
-            next_state: State after action, shape (3, 6, 7)
+            next_state: State after action, shape (2, 6, 7) from opponent's perspective
             done: Whether game ended
         
         Returns:
@@ -635,7 +649,8 @@ class DQNAgent(BaseAgent):
             if done:
                 target_q = reward
             else:
-                target_q = reward + self.gamma * next_q_value
+                # Negamax: negative sign because next_state is from opponent's perspective
+                target_q = reward - self.gamma * next_q_value
         
         # Train on this specific experience (most recent = index -1)
         metrics = self.train(sample_indices=[-1])
