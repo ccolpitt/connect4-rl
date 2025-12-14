@@ -109,17 +109,17 @@ class DQNReplayBuffer:
         experience = (state, action, reward, next_state, done)
         self.buffer.append(experience)
     
-    def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Sample a random batch of experiences for training.
+        Sample a batch of experiences for training.
         
-        This method randomly samples experiences from the buffer, which:
-        1. Breaks correlation between consecutive experiences
-        2. Allows learning from diverse situations
-        3. Improves training stability
+        This method samples experiences from the buffer, either randomly or from
+        specific indices (useful for auditing).
         
         Args:
             batch_size: Number of experiences to sample (typically 32, 64, or 128)
+            indices: Optional list of specific indices to sample. If None, samples randomly.
+                    Use negative indices to count from end (e.g., [-1] for most recent)
         
         Returns:
             Tuple of numpy arrays:
@@ -130,20 +130,21 @@ class DQNReplayBuffer:
             - dones: (batch_size,) - batch of done flags
         
         Raises:
-            ValueError: If batch_size > len(buffer)
+            ValueError: If batch_size > len(buffer) or invalid indices
         
         Example:
-            # Sample batch for training
-            if len(buffer) >= 32:
-                states, actions, rewards, next_states, dones = buffer.sample(32)
-                
-                # Use for training
-                q_values = network(states)
-                target_q = rewards + gamma * max(network(next_states))
-                loss = (q_values - target_q) ** 2
+            # Random sampling (normal training)
+            states, actions, rewards, next_states, dones = buffer.sample(32)
+            
+            # Sample most recent experience (auditing)
+            states, actions, rewards, next_states, dones = buffer.sample(1, indices=[-1])
+            
+            # Sample specific experiences
+            states, actions, rewards, next_states, dones = buffer.sample(3, indices=[0, 5, 10])
         
         Note:
-            - Sampling is with replacement (same experience can appear multiple times)
+            - Random sampling is with replacement
+            - Specific indices sampling is without replacement
             - Returns numpy arrays ready for PyTorch/TensorFlow
         """
         if batch_size > len(self.buffer):
@@ -152,12 +153,27 @@ class DQNReplayBuffer:
                 f"Wait until buffer has at least {batch_size} experiences."
             )
         
-        # Randomly sample batch_size experiences
-        batch = random.sample(self.buffer, batch_size)
+        if indices is not None:
+            # Sample specific indices
+            if len(indices) != batch_size:
+                raise ValueError(f"Number of indices ({len(indices)}) must match batch_size ({batch_size})")
+            
+            # Convert negative indices to positive
+            buffer_len = len(self.buffer)
+            positive_indices = [(i if i >= 0 else buffer_len + i) for i in indices]
+            
+            # Validate indices
+            for i in positive_indices:
+                if i < 0 or i >= buffer_len:
+                    raise ValueError(f"Index {i} out of range for buffer of size {buffer_len}")
+            
+            # Get experiences at specific indices
+            batch = [self.buffer[i] for i in positive_indices]
+        else:
+            # Randomly sample batch_size experiences
+            batch = random.sample(self.buffer, batch_size)
         
         # Unzip the batch into separate arrays
-        # batch is a list of tuples: [(s1,a1,r1,s1',d1), (s2,a2,r2,s2',d2), ...]
-        # zip(*batch) transposes it: [(s1,s2,...), (a1,a2,...), (r1,r2,...), ...]
         states, actions, rewards, next_states, dones = zip(*batch)
         
         # Convert to numpy arrays for efficient computation

@@ -191,7 +191,6 @@ class TrainingMetrics:
         self.losses.append(loss)
         self.mean_q_values.append(mean_q)
         self.epsilons.append(epsilon)
-        
         self.recent_losses.append(loss)
         self.recent_q_values.append(mean_q)
     
@@ -490,7 +489,7 @@ def plot_training_metrics(metrics: TrainingMetrics, save_path: str = None):
 
 
 def train_dqn_agent(
-    num_episodes: int = 50000,
+    num_episodes: int = 50000,  # Number of games
     eval_freq: int = 1000,
     eval_games: int = 100,
     health_check_freq: int = 500,

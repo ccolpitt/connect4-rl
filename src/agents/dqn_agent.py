@@ -350,12 +350,12 @@ class DQNAgent(BaseAgent):
         # Add to replay buffer
         self.replay_buffer.add(state, action, reward, next_state, done)
     
-    def train(self) -> Optional[Dict[str, float]]:
+    def train(self, sample_indices: Optional[List[int]] = None) -> Optional[Dict[str, float]]:
         """
         Perform one training step using experience replay.
         
         Algorithm:
-        1. Sample batch from replay buffer (prioritized or uniform)
+        1. Sample batch from replay buffer (prioritized or uniform, or specific indices)
         2. Compute Q-learning targets: y = r + γ * max_a' Q_target(s', a')
         3. Compute loss: MSE(Q(s,a), y)
         4. Apply importance sampling weights (if using PER)
@@ -363,20 +363,33 @@ class DQNAgent(BaseAgent):
         6. Update priorities (if using PER)
         7. Update target network (hard copy or Polyak)
         
+        Args:
+            sample_indices: Optional list of specific buffer indices to sample.
+                          If provided, samples these exact experiences (useful for auditing).
+                          If None, samples randomly as normal.
+        
         Returns:
             Dictionary with training metrics (loss, q_values, etc.)
             None if not enough data in buffer
         """
-        # Check if we have enough data
-        if not self.replay_buffer.is_ready(self.min_buffer_size):
+        # Check if we have enough data (skip check if using specific indices)
+        if sample_indices is None and not self.replay_buffer.is_ready(self.min_buffer_size):
             return None
         
         # Sample batch from replay buffer
         if self.use_prioritized_replay:
+            if sample_indices is not None:
+                raise NotImplementedError("Specific indices sampling not yet supported with prioritized replay")
             (states, actions, rewards, next_states, dones), indices, weights = self.replay_buffer.sample(self.batch_size)
             weights = torch.FloatTensor(weights).to(self.device)
         else:
-            states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+            if sample_indices is not None:
+                # Sample specific indices (for auditing)
+                batch_size = len(sample_indices)
+                states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size, indices=sample_indices)
+            else:
+                # Normal random sampling
+                states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
             indices = None
             weights = None
         
@@ -550,6 +563,119 @@ class DQNAgent(BaseAgent):
             'buffer_capacity': self.replay_buffer.capacity,
             **self.get_stats()
         }
+    
+    def get_q_values(self, state: np.ndarray) -> np.ndarray:
+        """
+        Get Q-values for all actions in a given state.
+        
+        Useful for debugging and auditing to see what the network predicts.
+        
+        Args:
+            state: Game state, shape (3, 6, 7)
+        
+        Returns:
+            Q-values for all 7 actions, shape (7,)
+        """
+        self.q_network.eval()
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            q_values = self.q_network(state_tensor).cpu().numpy()[0]
+        return q_values
+    
+    def audit_training_step(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool
+    ) -> Dict[str, Any]:
+        """
+        Audit a single training step to verify Q-value updates.
+        
+        This method:
+        1. Gets Q-values before training
+        2. Adds the test experience to replay buffer
+        3. Performs one training step on that specific experience (most recent)
+        4. Gets Q-values after training
+        5. Returns detailed metrics for verification
+        
+        Useful for debugging to ensure the network is learning correctly.
+        
+        Args:
+            state: State before action, shape (3, 6, 7)
+            action: Action taken (column index 0-6)
+            reward: Reward received
+            next_state: State after action, shape (3, 6, 7)
+            done: Whether game ended
+        
+        Returns:
+            Dictionary with audit metrics:
+            - q_before: Q-values before training
+            - q_after: Q-values after training
+            - q_change: Change in Q-value for the action
+            - target_q: Target Q-value computed
+            - td_error: TD error (target - current)
+            - loss: Training loss
+        """
+        # Get Q-values before training
+        q_before = self.get_q_values(state)
+        q_action_before = q_before[action]
+        
+        # Add test experience to buffer
+        self.replay_buffer.add(state, action, reward, next_state, done)
+        
+        # Compute expected target Q-value
+        with torch.no_grad():
+            next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(self.device)
+            if self.use_double_dqn:
+                next_q_online = self.q_network(next_state_tensor)
+                next_action = next_q_online.argmax(dim=1).item()
+                next_q_target = self.target_network(next_state_tensor)
+                next_q_value = next_q_target[0, next_action].item()
+            else:
+                next_q_value = self.target_network(next_state_tensor).max(dim=1)[0].item()
+            
+            if done:
+                target_q = reward
+            else:
+                target_q = reward + self.gamma * next_q_value
+        
+        # Train on this specific experience (most recent = index -1)
+        metrics = self.train(sample_indices=[-1])
+        
+        # Get Q-values after training
+        q_after = self.get_q_values(state)
+        q_action_after = q_after[action]
+        
+        # Compute changes
+        q_change = q_action_after - q_action_before
+        td_error = target_q - q_action_before
+        
+        return {
+            'q_before': q_before,
+            'q_after': q_after,
+            'q_action_before': q_action_before,
+            'q_action_after': q_action_after,
+            'q_change': q_change,
+            'target_q': target_q,
+            'td_error': td_error,
+            'loss': metrics['loss'] if metrics else None,
+            'action': action,
+            'reward': reward,
+            'done': done
+        }
+    
+    def clear_replay_buffer(self) -> None:
+        """
+        Clear all experiences from the replay buffer.
+        
+        Useful for:
+        - Starting fresh training
+        - Auditing specific scenarios
+        - Memory management
+        """
+        self.replay_buffer.clear()
     
     def __str__(self) -> str:
         """String representation with training info."""
