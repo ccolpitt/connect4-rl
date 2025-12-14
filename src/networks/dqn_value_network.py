@@ -6,7 +6,9 @@ The network takes a state as input and outputs Q-values for ALL actions simultan
 
 Architecture:
 -------------
-Input: State (3, 6, 7) - 3 channels (Player1, Player2, CurrentPlayer)
+Input: State (2, 6, 7) - 2 channels (canonical representation)
+   - Channel 0: Current player's pieces (MY pieces)
+   - Channel 1: Opponent's pieces (THEIR pieces)
    ↓
 Convolutional Layers (extract spatial features)
    ↓
@@ -26,14 +28,14 @@ Key Design Decisions:
 Example:
 --------
     network = DQNValueNetwork(
-        input_channels=3,
+        input_channels=2,
         num_actions=7,
         conv_channels=[32, 64],
         fc_dims=[128, 64],
         dropout_rate=0.1
     )
     
-    state = torch.tensor(state, dtype=torch.float32)  # (batch, 3, 6, 7)
+    state = torch.tensor(state, dtype=torch.float32)  # (batch, 2, 6, 7)
     q_values = network(state)  # (batch, 7) - Q-value for each action
     
     best_action = q_values.argmax(dim=1)  # Choose action with highest Q-value
@@ -57,7 +59,7 @@ class DQNValueNetwork(nn.Module):
         Conv layers → Flatten → FC layers → Output (7 Q-values)
     
     Attributes:
-        input_channels (int): Number of input channels (3 for Connect 4)
+        input_channels (int): Number of input channels (2 for canonical Connect 4)
         num_actions (int): Number of possible actions (7 for Connect 4)
         conv_channels (List[int]): Channels for each conv layer
         fc_dims (List[int]): Dimensions for each FC layer
@@ -65,7 +67,7 @@ class DQNValueNetwork(nn.Module):
     """
     
     def __init__(self,
-                 input_channels: int = 3,
+                 input_channels: int = 2,
                  num_actions: int = 7,
                  conv_channels: Optional[List[int]] = None,
                  fc_dims: Optional[List[int]] = None,
@@ -76,7 +78,7 @@ class DQNValueNetwork(nn.Module):
         Initialize DQN Value Network.
         
         Args:
-            input_channels: Number of input channels (3 for Connect 4)
+            input_channels: Number of input channels (2 for canonical Connect 4)
             num_actions: Number of possible actions (7 columns)
             conv_channels: List of channel sizes for conv layers.
                           Default: [32, 64] (2 conv layers)
@@ -244,17 +246,16 @@ class DQNValueNetwork(nn.Module):
         Forward pass through the network.
         
         Args:
-            x: Input state tensor of shape (batch_size, 3, 6, 7)
-               - Channel 0: Player 1 pieces
-               - Channel 1: Player 2 pieces
-               - Channel 2: Current player indicator
+            x: Input state tensor of shape (batch_size, 2, 6, 7)
+               - Channel 0: Current player's pieces (MY pieces)
+               - Channel 1: Opponent's pieces (THEIR pieces)
         
         Returns:
             torch.Tensor: Q-values for each action, shape (batch_size, 7)
                          Each value represents Q(s, a) for that action
         
         Example:
-            state = torch.randn(32, 3, 6, 7)  # Batch of 32 states
+            state = torch.randn(32, 2, 6, 7)  # Batch of 32 states
             q_values = network(state)          # (32, 7)
             
             # Get best action for each state

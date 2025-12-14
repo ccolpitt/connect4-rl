@@ -63,35 +63,40 @@ class ConnectFourEnvironment:
     
     def get_state(self) -> np.ndarray:
         """
-        Get current state from current player's perspective.
+        Get current state from current player's perspective (canonical representation).
         
         CRITICAL: For self-play, the agent must always see the board from its own
         perspective, with its pieces in Channel 0 and opponent's in Channel 1.
         
+        This is the "canonical" representation where the network always sees:
+        - Channel 0: MY pieces (current player)
+        - Channel 1: OPPONENT's pieces
+        
         Returns:
-            np.ndarray: State tensor of shape (3, ROWS, COLS) in (C, H, W) format
+            np.ndarray: State tensor of shape (2, ROWS, COLS) in (C, H, W) format
                 - Channel 0: Current player's pieces (MY pieces)
                 - Channel 1: Opponent's pieces (THEIR pieces)
-                - Channel 2: Always 1.0 (indicates "my turn")
         """
         return self.get_state_from_perspective(self.current_player)
     
     def get_state_from_perspective(self, player: int) -> np.ndarray:
         """
-        Get state from specified player's perspective.
+        Get state from specified player's perspective (canonical representation).
         
         This ensures the agent always sees:
         - Channel 0: Its own pieces
         - Channel 1: Opponent's pieces
-        - Channel 2: Always 1.0 (my turn indicator)
+        
+        No player indicator channel is needed because the network always sees
+        the board from "my" perspective (canonical representation).
         
         Args:
             player: Player to get perspective for (1 or -1)
         
         Returns:
-            np.ndarray: State from player's perspective (3, ROWS, COLS)
+            np.ndarray: State from player's perspective (2, ROWS, COLS)
         """
-        state = np.zeros((3, self.rows, self.cols), dtype=np.float32)
+        state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         
         if player == self.config.PLAYER_1:
             # Player 1's perspective
@@ -101,9 +106,6 @@ class ConnectFourEnvironment:
             # Player 2's perspective (flipped)
             state[0, :, :] = (self.board == self.config.PLAYER_2).astype(np.float32)  # My pieces
             state[1, :, :] = (self.board == self.config.PLAYER_1).astype(np.float32)  # Opponent's pieces
-        
-        # Channel 2: Always 1.0 to indicate "my turn"
-        state[2, :, :] = 1.0
         
         return state
     
@@ -127,16 +129,16 @@ class ConnectFourEnvironment:
     
     def get_legal_moves_ext(self, state: np.ndarray) -> List[int]:
         """
-        Get legal moves from external 3D state representation.
+        Get legal moves from external state representation.
         
         Args:
-            state: State tensor of shape (3, ROWS, COLS)
+            state: State tensor of shape (2, ROWS, COLS) or (ROWS, COLS)
         
         Returns:
             List[int]: List of valid column indices
         """
-        if state.shape == (3, self.rows, self.cols):
-            # Extract board from 3D state
+        if state.shape == (2, self.rows, self.cols):
+            # Extract board from 2-channel state
             board = np.zeros((self.rows, self.cols))
             board[state[0, :, :] == 1] = self.config.PLAYER_1
             board[state[1, :, :] == 1] = self.config.PLAYER_2
@@ -200,25 +202,23 @@ class ConnectFourEnvironment:
         # Return state from NEXT player's perspective
         return self.get_state(), reward, done
     
-    def apply_move_to_state(self, state: np.ndarray, action: int, 
+    def apply_move_to_state(self, state: np.ndarray, action: int,
                            current_player: int) -> np.ndarray:
         """
         Apply move to state without modifying environment (for MCTS simulation).
         
         Args:
-            state: Current state tensor (3, ROWS, COLS)
+            state: Current state tensor (2, ROWS, COLS)
             action: Column index to play
             current_player: Player making the move (1 or -1)
         
         Returns:
-            np.ndarray: New state after applying the move
+            np.ndarray: New state after applying the move (from next player's perspective)
         """
-        new_state = state.copy()
-        
         # Extract board from state
         board = np.zeros((self.rows, self.cols))
-        board[state[0, :, :] == 1] = self.config.PLAYER_1
-        board[state[1, :, :] == 1] = self.config.PLAYER_2
+        board[state[0, :, :] == 1] = current_player  # Channel 0 = current player
+        board[state[1, :, :] == 1] = -current_player  # Channel 1 = opponent
         
         # Apply move
         for row in reversed(range(self.rows)):
@@ -226,10 +226,11 @@ class ConnectFourEnvironment:
                 board[row, action] = current_player
                 break
         
-        # Update state channels
-        new_state[0, :, :] = (board == self.config.PLAYER_1).astype(np.float32)
-        new_state[1, :, :] = (board == self.config.PLAYER_2).astype(np.float32)
-        new_state[2, :, :] = 1.0 if -current_player == self.config.PLAYER_1 else 0.0
+        # Return state from NEXT player's perspective (flipped)
+        next_player = -current_player
+        new_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
+        new_state[0, :, :] = (board == next_player).astype(np.float32)  # Next player's pieces
+        new_state[1, :, :] = (board == current_player).astype(np.float32)  # Current player's pieces
         
         return new_state
     
@@ -284,13 +285,13 @@ class ConnectFourEnvironment:
         This method scans the entire board since we don't have last_move info.
         
         Args:
-            state: State tensor (3, ROWS, COLS) or 2D board
+            state: State tensor (2, ROWS, COLS) or 2D board
         
         Returns:
             int or None: Winner player (1 or -1), or None if no winner
         """
-        # Extract 2D board from 3D state
-        if len(state.shape) == 3 and state.shape == (3, self.rows, self.cols):
+        # Extract 2D board from 2-channel state
+        if len(state.shape) == 3 and state.shape == (2, self.rows, self.cols):
             board = np.zeros((self.rows, self.cols))
             board[state[0, :, :] == 1] = self.config.PLAYER_1
             board[state[1, :, :] == 1] = self.config.PLAYER_2
@@ -331,11 +332,11 @@ class ConnectFourEnvironment:
         Set environment to a specific board state.
         
         Args:
-            board: 2D board array or 3D state tensor
+            board: 2D board array or 2-channel state tensor
             current_player: Player whose turn it is (1 or -1)
         """
-        if len(board.shape) == 3 and board.shape == (3, self.rows, self.cols):
-            # Extract board from 3D state
+        if len(board.shape) == 3 and board.shape == (2, self.rows, self.cols):
+            # Extract board from 2-channel state
             self.board = np.zeros((self.rows, self.cols))
             self.board[board[0, :, :] == 1] = self.config.PLAYER_1
             self.board[board[1, :, :] == 1] = self.config.PLAYER_2
@@ -367,12 +368,12 @@ class ConnectFourEnvironment:
         Render external state representation.
         
         Args:
-            state: State tensor (3, ROWS, COLS) or 2D board
+            state: State tensor (2, ROWS, COLS) or 2D board
         """
         display = {1: 'X', -1: 'O', 0: '.'}
         
         # Extract board from state
-        if len(state.shape) == 3 and state.shape == (3, self.rows, self.cols):
+        if len(state.shape) == 3 and state.shape == (2, self.rows, self.cols):
             board = np.zeros((self.rows, self.cols))
             board[state[0, :, :] == 1] = self.config.PLAYER_1
             board[state[1, :, :] == 1] = self.config.PLAYER_2
