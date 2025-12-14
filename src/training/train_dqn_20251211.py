@@ -232,6 +232,9 @@ def play_self_play_game(agent: DQNAgent, env: ConnectFourEnvironment, metrics: T
     """
     Play one self-play game where agent plays both sides.
     
+    CRITICAL: Implements loser experience storage for proper credit assignment.
+    When a player wins, the opponent's last move gets reward = -1.0.
+    
     Args:
         agent: DQN agent to train
         env: Connect 4 environment
@@ -244,6 +247,11 @@ def play_self_play_game(agent: DQNAgent, env: ConnectFourEnvironment, metrics: T
     env.reset()
     done = False
     moves = 0
+    
+    # Track previous player's state and action for loser experience
+    prev_state = None
+    prev_action = None
+    prev_next_state = None
     
     while not done and moves < 42:
         state = env.get_state()
@@ -260,8 +268,25 @@ def play_self_play_game(agent: DQNAgent, env: ConnectFourEnvironment, metrics: T
         next_state, reward, done = env.play_move(action)
         moves += 1
         
-        # Store experience
+        # Store winner's experience (if game ended with a win)
         agent.observe(state, action, reward, next_state, done)
+        
+        # If game ended with a winner, store loser's experience
+        if done and reward == 1.0:  # Someone won (reward = 1.0 for winner)
+            # The previous player (who just moved before this winning move) is the loser
+            if prev_state is not None:
+                # Loser's experience: their last move led to opponent winning
+                # State: prev_state (before their move)
+                # Action: prev_action (their move)
+                # Reward: -1.0 (they lost)
+                # Next state: prev_next_state (after their move, from opponent's perspective)
+                # Done: True (game ended)
+                agent.observe(prev_state, prev_action, -1.0, prev_next_state, True)
+        
+        # Update previous player's state/action for next iteration
+        prev_state = state
+        prev_action = action
+        prev_next_state = next_state
         
         # Train if enough data
         if agent.replay_buffer.is_ready(agent.batch_size):
