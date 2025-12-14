@@ -329,7 +329,7 @@ class DQNAgent(BaseAgent):
         self,
         state: np.ndarray,
         action: int,
-        reward: Optional[float],
+        reward: float,
         next_state: np.ndarray,
         done: bool
     ) -> None:
@@ -339,14 +339,10 @@ class DQNAgent(BaseAgent):
         Args:
             state: State before action, shape (3, 6, 7)
             action: Action taken (column index 0-6)
-            reward: Reward received (1.0 win, -1.0 loss, 0.0 draw, None continuing)
+            reward: Reward received (1.0 win, -1.0 loss, 0.0 draw/continuing)
             next_state: State after action, shape (3, 6, 7)
             done: Whether game ended
         """
-        # Convert None reward to 0.0 for continuing games
-        if reward is None:
-            reward = 0.0
-        
         # Add to replay buffer
         self.replay_buffer.add(state, action, reward, next_state, done)
     

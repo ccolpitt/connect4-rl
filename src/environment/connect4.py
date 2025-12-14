@@ -146,7 +146,7 @@ class ConnectFourEnvironment:
         
         return [col for col in range(self.cols) if board[0, col] == 0]
     
-    def play_move(self, col: int) -> Tuple[np.ndarray, Optional[float], bool]:
+    def play_move(self, col: int) -> Tuple[np.ndarray, float, bool]:
         """
         Execute a move in the specified column.
         
@@ -156,8 +156,8 @@ class ConnectFourEnvironment:
         Returns:
             Tuple containing:
                 - state (np.ndarray): New state from NEXT player's perspective
-                - reward (float or None): Reward from PREVIOUS player's perspective
-                  (+1.0 for win, -1.0 for loss, 0.0 for draw, None if game continues)
+                - reward (float): Reward from PREVIOUS player's perspective
+                  (+1.0 for win, -1.0 for loss, 0.0 for draw or continuing game)
                 - done (bool): Whether the game has ended
         
         Raises:
@@ -192,7 +192,7 @@ class ConnectFourEnvironment:
         elif len(legal_moves) == 0:
             reward = self.config.DRAW_VALUE  # Draw (0.0)
         else:
-            reward = None  # Game continues, no reward yet
+            reward = 0.0  # Game continues, no immediate reward
         
         # Switch to next player
         self.current_player *= -1
