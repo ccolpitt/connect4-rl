@@ -1,3 +1,8 @@
+# *****************************************************************
+# Learning rate comparison test - same initial weights, different LRs
+# Look at last 2 moves.  Last move = +1 reward; 2nd to last = -1 reward
+# *****************************************************************
+
 import sys
 sys.path.append('..')
 
@@ -68,7 +73,9 @@ for i in range(len(actions_list)):
     print(f"Added {replay_buffer[-1]['desc']} to buffer. Reward: {reward}, Done: {done}")
 
 # *****************************************************************
-# Print replay buffer
+# Print replay buffer --> looks ok, as of 12/21/2025
+"""
+print( "*"*60)
 print( "Replay Buffer entry 1:")
 print( replay_buffer[0]["state"])
 print( "Action: ", replay_buffer[0]["action"])
@@ -76,6 +83,15 @@ print( "Reward: ", replay_buffer[0]["reward"])
 print( "Next State:" )
 print( replay_buffer[0]["next_state"])
 print( "Done: ", replay_buffer[0]["done"])
+print()
+print( "Replay Buffer entry 2:")
+print( replay_buffer[1]["state"])
+print( "Action: ", replay_buffer[1]["action"])
+print( "Reward: ", replay_buffer[1]["reward"])
+print( "Next State:" )
+print( replay_buffer[1]["next_state"])
+print( "Done: ", replay_buffer[1]["done"])
+"""
 
 # *****************************************************************
 # Create INITIAL network
@@ -98,15 +114,23 @@ for layer in [conv1_init, conv2_init, fc1_init, output_init]:
         nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
         nn.init.constant_(layer.bias, 0)
 
+# --- STEP 1: PREPARE DATA TENSORS (OUTSIDE BOTH LOOPS) ---
+# This converts your list of dictionaries into fixed batch tensors
+states_b = torch.stack([torch.tensor(e['state'], dtype=torch.float32) for e in replay_buffer])
+next_states_b = torch.stack([torch.tensor(e['next_state'], dtype=torch.float32) for e in replay_buffer])
+actions_b = torch.tensor([e['action'] for e in replay_buffer], dtype=torch.long)
+rewards_b = torch.tensor([e['reward'] for e in replay_buffer], dtype=torch.float32)
+dones_b = torch.tensor([float(e['done']) for e in replay_buffer], dtype=torch.float32)
+
+all_results = {}
+
 # *****************************************************************
 # Train with each learning rate
 # *****************************************************************
-all_results = {}
-
 for lr in learning_rates:
-    print(f"\nTesting LR: {lr}")
+    print(f"\nTraining with LR: {lr}")
     
-    # Deepcopy initialized layers
+    # Model Setup (using your initial layers)
     conv1, bn1, dr1 = copy.deepcopy(conv1_init), copy.deepcopy(bn1_init), copy.deepcopy(dropout1_init)
     conv2, bn2, dr2 = copy.deepcopy(conv2_init), copy.deepcopy(bn2_init), copy.deepcopy(dropout2_init)
     fc1, dr3, output = copy.deepcopy(fc1_init), copy.deepcopy(dropout3_init), copy.deepcopy(output_init)
@@ -121,73 +145,100 @@ for lr in learning_rates:
         x = dr3(x)
         return output(x)
 
-    optimizer = torch.optim.Adam(
-        list(conv1.parameters()) + list(bn1.parameters()) + 
-        list(conv2.parameters()) + list(bn2.parameters()) + 
-        list(fc1.parameters()) + list(output.parameters()), lr=lr
-    )
+    all_params = list(conv1.parameters()) + list(bn1.parameters()) + \
+                 list(conv2.parameters()) + list(bn2.parameters()) + \
+                 list(fc1.parameters()) + list(output.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=lr)
 
-    # History tracking
-    history = {i: [] for i in range(len(replay_buffer))}
-    loss_history = []
+    # History storage for metrics
+    lr_history = {
+        'win_q': [], 'loss_q': [], 'loss': [], 'grads': [], 'avg_abs_q': []
+    }
 
     for iteration in range(training_iterations):
         optimizer.zero_grad()
-        total_loss = 0
-        
-        # Process the entire batch (the replay buffer)
-        for i, entry in enumerate(replay_buffer):
-            s = torch.tensor(entry['state'], dtype=torch.float32).unsqueeze(0)
-            ns = torch.tensor(entry['next_state'], dtype=torch.float32).unsqueeze(0)
-            a = entry['action']
-            r = entry['reward']
-            d = entry['done']
-            
-            # Calculate Target Q
-            with torch.no_grad():
-                if d:
-                    target_q = torch.tensor(r, dtype=torch.float32)
-                else:
-                    # Bellman Equation: r + gamma * max(Q(ns))
-                    next_q = forward(ns)
-                    target_q = r + gamma * torch.max(next_q)
-            
-            # Forward pass
-            current_q_values = forward(s)
-            predicted_q = current_q_values[0, a]
-            
-            loss = nn.functional.mse_loss(predicted_q, target_q)
-            total_loss += loss
-            history[i].append(predicted_q.item())
-            
-        total_loss.backward()
-        optimizer.step()
-        loss_history.append(total_loss.item())
 
-    all_results[lr] = {'history': history, 'loss': loss_history}
+        # 1. BATCH TARGET CALCULATION (Negamax Bellman)
+        # Target = Reward - gamma * max_q(S') * (1 - done)
+        with torch.no_grad():
+            next_q_batch = forward(next_states_b)
+            max_next_q = next_q_batch.max(dim=1)[0]
+            targets = rewards_b - (gamma * max_next_q * (1 - dones_b))
+
+        # 2. BATCH FORWARD PASS
+        current_q_batch = forward(states_b)
+        
+        # Extract predicted Q for the specific actions taken
+        # (Batch Size, 7) -> (Batch Size, 1) -> (Batch Size)
+        predicted_qs = current_q_batch.gather(1, actions_b.unsqueeze(1)).squeeze(1)
+
+        # 3. BATCH LOSS & UPDATE
+        loss = nn.functional.mse_loss(predicted_qs, targets)
+        loss.backward()
+        
+        # Calculate Gradient Magnitude (avg absolute grad)
+        total_grad = sum(p.grad.abs().sum().item() for p in all_params if p.grad is not None)
+        total_params = sum(p.numel() for p in all_params if p.grad is not None)
+        
+        optimizer.step()
+
+        # 4. RECORD METRICS
+        lr_history['win_q'].append(predicted_qs[1].item())  # Last move
+        lr_history['loss_q'].append(predicted_qs[0].item()) # 2nd to last
+        lr_history['loss'].append(loss.item())
+        lr_history['grads'].append(total_grad / total_params)
+        # Average Absolute Q value across all 7 actions for both samples
+        lr_history['avg_abs_q'].append(torch.mean(torch.abs(current_q_batch)).item())
+
+    all_results[lr] = lr_history
 
 # *****************************************************************
 # Visualization
 # *****************************************************************
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+fig.suptitle(f"Connect 4 DQN Training Analysis (Gamma={gamma})", fontsize=16)
+
+colors = ['blue', 'green', 'red', 'purple', 'orange']
 
 for i, lr in enumerate(learning_rates):
-    # Plot Loss
-    ax1.plot(all_results[lr]['loss'], label=f'LR {lr}')
+    res = all_results[lr]
     
-    # Plot Q-values for both moves for the best LR (or first one)
-    if lr == learning_rates[0]:
-        for move_idx in range(len(replay_buffer)):
-            ax2.plot(all_results[lr]['history'][move_idx], 
-                    linestyle='--', label=f'Move {move_idx+1} Q (LR {lr})')
+    # Top Left: Winning Move Q
+    axes[0,0].plot(res['win_q'], label=f'LR={lr}', color=colors[i])
+    axes[0,0].set_title("Winning Move Q-Value (Target -> 1.0)")
+    axes[0,0].axhline(1.0, color='black', linestyle='--', alpha=0.5)
 
-ax1.set_title("Total Batch Loss")
-ax1.set_yscale('log')
-ax1.legend()
+    # Top Right: Losing Move Q
+    axes[0,1].plot(res['loss_q'], label=f'LR={lr}', color=colors[i])
+    axes[0,1].set_title("Losing Move Q-Value (Negamax Target)")
+    # Showing common target lines for context
+    axes[0,1].axhline(-1.0, color='red', linestyle=':', alpha=0.4, label="-1.0 Reference")
+    axes[0,1].axhline(-1.99, color='darkred', linestyle='--', alpha=0.4, label="Bellman -1.99")
 
-ax2.set_title("Q-Value Convergence (Sample LR)")
-ax2.axhline(1.0, color='g', alpha=0.3, label="Win Target")
-ax2.axhline(-1.0, color='r', alpha=0.3, label="Loss Target")
-ax2.legend()
+    # Bottom Left: Batch Loss
+    axes[1,0].plot(res['loss'], label=f'LR={lr}', color=colors[i])
+    axes[1,0].set_title("Batch MSE Loss")
+    axes[1,0].set_yscale('log')
 
+    # Bottom Right: Gradient Magnitude
+    axes[1,1].plot(res['grads'], label=f'LR={lr}', color=colors[i])
+    axes[1,1].set_title("Average Gradient Magnitude")
+    axes[1,1].set_yscale('log')
+
+for ax in axes.flat:
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.show()
+
+# Extra Plot: Average Q Magnitude (confidence/stability check)
+plt.figure(figsize=(8, 5))
+for i, lr in enumerate(learning_rates):
+    plt.plot(all_results[lr]['avg_abs_q'], label=f'LR={lr}', color=colors[i])
+plt.title("Average Absolute Q-Value (All 7 Actions)")
+plt.xlabel("Episode")
+plt.ylabel("Mean(|Q|)")
+plt.legend()
+plt.grid(True, alpha=0.3)
 plt.show()
