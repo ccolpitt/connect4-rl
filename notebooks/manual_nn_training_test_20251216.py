@@ -91,7 +91,7 @@ done_tensor = torch.tensor(float(done), dtype=torch.float32)
 
 # Hyperparameters
 gamma = 0.99
-learning_rate = 0.001
+learning_rate = 0.0001
 
 # Create optimizer
 all_params = list(conv1.parameters()) + list(bn1.parameters()) + \
@@ -270,8 +270,8 @@ ax.legend()
 ax.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
-plt.savefig('notebooks/gradient_analysis_20251216.png', dpi=150, bbox_inches='tight')
-print("Saved visualization to: notebooks/gradient_analysis_20251216.png")
+plt.savefig('gradient_analysis_20251216.png', dpi=150, bbox_inches='tight')
+print("Saved visualization to: gradient_analysis_20251216.png")
 plt.show()
 
 print("\n" + "="*60)
