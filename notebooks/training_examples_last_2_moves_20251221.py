@@ -23,12 +23,12 @@ def get_training_examples():
     
     # ****** Training Example 1 ******
     board = np.array(
-        [[0, 0, 0, 0, 0, 0, 1],
-         [0, 0, 0, 0, 0, 0, 1],
-         [0, 0, 0, 0, 0, 0, 1],
-         [0, 1, 0, 0, 0, 0, -1],
-         [0, -1, 1, -1, 1, -1, -1],
-         [0, 1, -1, 1, -1, -1, 1]]
+        [[0,  0,  0,  0,  0,  0,  1],
+         [0,  0,  0,  0,  0,  0,  1],
+         [0,  0,  0,  0,  0,  0,  1],
+         [0,  1,  0,  0,  0,  0, -1],
+         [0, -1,  1, -1,  1, -1, -1],
+         [0,  1, -1,  1, -1, -1,  1]]
     )
     last_moves = [1, 5]
     rewards = [-1.0, 1.0]
@@ -37,12 +37,72 @@ def get_training_examples():
         'board': board.copy(),
         'last_moves': last_moves,
         'rewards': rewards,
-        'players': players
+        'players': players,
+        'description': 'Example 1: Player 1 wins diag / at column 5'
     })
+
+    # Flipped version
+    examples.append({
+        'board': -1 * board,
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': -1 * players,
+        'description': 'Example 2: Player -1 wins diag / at column 5'
+    })
+
+    # ****** Training Example 1.1 ******
+    board = np.array(
+        [[ 0,  0,  0,  0,  0,  1, 0],
+         [ 0,  0,  0,  0,  0,  1, 0],
+         [ 0,  0,  0,  0,  0,  1, 0],
+         [ 1,  0,  0,  0,  0, -1, 0],
+         [-1,  1, -1,  1, -1, -1, 0],
+         [ 1, -1,  1, -1, -1,  1, 0]])
+    last_moves = [0, 4]
+    rewards = [-1.0, 1.0]
+    players = [-1, 1]
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'Example 1: Player 1 wins diag / at column 5'
+    })
+    # Flipped version
+    examples.append({
+        'board': -1 * board,
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': -1 * players,
+        'description': 'Example 2: Player -1 wins diag / at column 5'
+    })
+    # ****** Training Example 3 ******
+    board = np.array(
+        [[0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0, -1, -1, 0, 0],
+         [0, 0,  1,  1,  1, 0, 0]])
+    last_moves = [2, 1]
+    rewards = [-1.0, 1.0]
+    players = [-1, 1]
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'Example 1: Player 1 wins diag / at column 5'
+    })
+    # Flipped version
+    examples.append({
+        'board': -1 * board,
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': -1 * players,
+        'description': 'Example 2: Player -1 wins diag / at column 5'
+    })
+
 
     return examples
 
-# Test stuff out
-#training_examples = get_training_examples()
-#print( training_examples[0] )
-#print( training_examples[0]['board'][0,:,:])

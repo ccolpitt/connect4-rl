@@ -57,7 +57,7 @@ class NetworkHealthMonitor:
     - Weight distribution
     """
     
-    def __init__(self, dead_threshold: float = 1e-3, exploding_threshold: float = 100.0):
+    def __init__(self, dead_threshold: float = 5e-3, exploding_threshold: float = 50.0):
         """
         Initialize health monitor.
         

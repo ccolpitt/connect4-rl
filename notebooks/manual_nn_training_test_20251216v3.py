@@ -151,7 +151,7 @@ for lr in learning_rates:
                  list(fc1.parameters()) + list(output.parameters())
     optimizer = torch.optim.Adam(all_params, lr=lr)
     
-    # Calculate target Q-value (same for all)
+    # Calculate target Q-value (same for all episodes)
     with torch.no_grad():
         next_q_values = forward(end_state_tensor.unsqueeze(0))
         next_q_max = next_q_values.max(dim=1)[0]

@@ -39,6 +39,8 @@ config = Config()
 env = ConnectFourEnvironment(config)
 
 # A Replay Buffer stores (state, action, reward, next_state, done)
+# These are rewards in the real world, what we observe from the environment
+# So, rewards in the replay buffer should be + / - 1 for these training sets
 replay_buffer = deque()
 
 print("Processing move sequence into Replay Buffer...")
@@ -114,7 +116,7 @@ for layer in [conv1_init, conv2_init, fc1_init, output_init]:
         nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
         nn.init.constant_(layer.bias, 0)
 
-# --- STEP 1: PREPARE DATA TENSORS (OUTSIDE BOTH LOOPS) ---
+# --- STEP 1: PREPARE DATA TENSORS (OUTSIDE BOTH LOOPS) FOR BATCH PROCESSING ---
 # This converts your list of dictionaries into fixed batch tensors
 states_b = torch.stack([torch.tensor(e['state'], dtype=torch.float32) for e in replay_buffer])
 next_states_b = torch.stack([torch.tensor(e['next_state'], dtype=torch.float32) for e in replay_buffer])

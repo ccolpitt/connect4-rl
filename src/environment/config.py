@@ -31,6 +31,13 @@ class Config:
     PLAYER_1 = 1
     PLAYER_2 = -1
     DRAW_VALUE = 0
+
+    # Neural Net Constants
+    DROPOUT_RATE = 0.0
+
+    # Neural Net Constants
+    NUM_GAME_EPISODES = 1
+
     
     # Device configuration
     DEVICE = torch.device(

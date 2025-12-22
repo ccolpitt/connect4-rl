@@ -2,7 +2,7 @@
 DQN Value Network - Neural Network for Q-Value Estimation
 
 This module implements the Q-network used in DQN (Deep Q-Network) algorithm.
-The network takes a state as input and outputs Q-values for ALL actions simultaneously.
+The network takes a state as input and outputs estimated Q-values for ALL actions.
 
 Architecture:
 -------------
@@ -67,8 +67,8 @@ class DQNValueNetwork(nn.Module):
     """
     
     def __init__(self,
-                 input_channels: int = 2,
-                 num_actions: int = 7,
+                 input_channels: int = 2,  # I think this is the num_players
+                 num_actions: int = 7,     # Cols in board
                  conv_channels: Optional[List[int]] = None,
                  fc_dims: Optional[List[int]] = None,
                  dropout_rate: float = 0.0,
