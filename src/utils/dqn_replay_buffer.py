@@ -36,9 +36,10 @@ Example:
 
 import numpy as np
 import random
-from collections import deque
+from collections import deque, namedtuple
 from typing import Tuple, List
 
+Transition = namedtuple( 'Transition', ('state', 'action', 'reward', 'next_state', 'done'))
 
 class DQNReplayBuffer:
     """
@@ -106,9 +107,16 @@ class DQNReplayBuffer:
             - States are stored as-is (not copied), so make sure to pass copies if needed
             - Buffer automatically removes oldest when capacity is reached
         """
-        experience = (state, action, reward, next_state, done)
-        self.buffer.append(experience)
+        # Named tuple - recommended default
+        #experience = (state, action, reward, next_state, done)
+        # Version with a dictionary -- not memory efficient, and harder to assemble into batches
+        #experience = {"state":state,"action":action,"reward":reward,"next_state":next_state,"done":done}
+        #self.buffer.append(experience)
+        self.buffer.append( Transition( state, action, reward, next_state, done ) )
     
+    def update_penalty( self, index, new_reward, is_done ):
+        self.buffer[index] = self.buffer[index]._replace(reward = new_reward, done=is_done)
+
     def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Sample a batch of experiences for training.
@@ -174,8 +182,15 @@ class DQNReplayBuffer:
             batch = random.sample(self.buffer, batch_size)
         
         # Unzip the batch into separate arrays
+        #print( "We calculated the batch")
         states, actions, rewards, next_states, dones = zip(*batch)
-        
+        #print( "We broke out parts of the batch")
+        #print( "States in replay buffer: ")
+        #print( states )
+        #print( "Full Batch")
+        #print( batch )
+
+
         # Convert to numpy arrays for efficient computation
         states = np.array(states, dtype=np.float32)           # (batch_size, 3, 6, 7)
         actions = np.array(actions, dtype=np.int64)           # (batch_size,)

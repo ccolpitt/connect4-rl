@@ -38,6 +38,15 @@ class Config:
     # Neural Net Constants
     NUM_GAME_EPISODES = 1
 
+    # Neural Net Constants
+    EPS = .5
+
+    # Training Constants
+    TRAIN_EVERY_N_GAMES = 1
+    SAMPLE_SIZE = 64
+    
+
+
     
     # Device configuration
     DEVICE = torch.device(
