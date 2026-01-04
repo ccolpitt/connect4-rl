@@ -39,7 +39,7 @@ import random
 from collections import deque, namedtuple
 from typing import Tuple, List
 
-Transition = namedtuple( 'Transition', ('state', 'action', 'reward', 'next_state', 'done'))
+Transition = namedtuple( 'Transition', ('state', 'action', 'reward', 'next_state', 'done', 'next_mask'))
 
 class DQNReplayBuffer:
     """
@@ -82,7 +82,8 @@ class DQNReplayBuffer:
             action: int, 
             reward: float,
             next_state: np.ndarray, 
-            done: bool) -> None:
+            done: bool,
+            next_mask: np.ndarray) -> None:
         """
         Add a new experience to the buffer.
         
@@ -112,12 +113,12 @@ class DQNReplayBuffer:
         # Version with a dictionary -- not memory efficient, and harder to assemble into batches
         #experience = {"state":state,"action":action,"reward":reward,"next_state":next_state,"done":done}
         #self.buffer.append(experience)
-        self.buffer.append( Transition( state, action, reward, next_state, done ) )
+        self.buffer.append( Transition( state, action, reward, next_state, done, next_mask ) )
     
     def update_penalty( self, index, new_reward, is_done ):
         self.buffer[index] = self.buffer[index]._replace(reward = new_reward, done=is_done)
 
-    def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Sample a batch of experiences for training.
         
@@ -183,7 +184,7 @@ class DQNReplayBuffer:
         
         # Unzip the batch into separate arrays
         #print( "We calculated the batch")
-        states, actions, rewards, next_states, dones = zip(*batch)
+        states, actions, rewards, next_states, dones, next_masks = zip(*batch)
         #print( "We broke out parts of the batch")
         #print( "States in replay buffer: ")
         #print( states )
@@ -197,8 +198,9 @@ class DQNReplayBuffer:
         rewards = np.array(rewards, dtype=np.float32)         # (batch_size,)
         next_states = np.array(next_states, dtype=np.float32) # (batch_size, 3, 6, 7)
         dones = np.array(dones, dtype=np.float32)             # (batch_size,) - 1.0 if done, 0.0 if not
-        
-        return states, actions, rewards, next_states, dones
+        next_masks = np.array( next_masks, dtype=np.int16)    # (batch_size,)
+
+        return states, actions, rewards, next_states, dones, next_masks
     
     def __len__(self) -> int:
         """
