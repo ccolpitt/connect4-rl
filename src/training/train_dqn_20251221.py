@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Constants
 # *****************************************************************
-num_episodes                = 500   # Number of games to train on
+num_episodes                = 250   # Number of games to train on
 batch_size                  = 16
 learning_rate               = 0.00001
 training_iterations         = 1     # Training per game
@@ -137,6 +137,7 @@ initial_board = examples[example_test_case]['board']
 players = examples[example_test_case]['players']
 env.set_state( initial_board, players[0] )
 
+"""
 print( "Initial board ")
 print( initial_board)
 print( "Initial Player: ", players[0] )
@@ -155,6 +156,7 @@ print( env.get_state() )
 print( "Test Inference ")
 q_values = forward(env.get_state())
 print( "Q Values on flipped state: ", q_values )
+"""
 
 
 # *****************************************************************
@@ -456,6 +458,7 @@ from notebooks.training_examples_last_2_moves_20251221 import generate_artificia
 def train_on_synthetic_replay_buffer():
     # load replay buffer
     replay_buffer = generate_artificial_replay_buffer_for_training()
+    print( "Synthetic Replay Buffer Generated!  Len: ", len( replay_buffer))
     if replay_buffer.is_ready( 16 ):
         # Sample from replay buffer
         states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
@@ -468,7 +471,6 @@ def train_on_synthetic_replay_buffer():
         dones_tensor_batch = torch.FloatTensor(dones).to('cpu')
         next_masks_tensor_batch = torch.FloatTensor(next_masks).to('cpu')
 
-def train_on_synthetic_replay_buffer():
     for episode in range(1, num_episodes + 1): # fake game - we just pre-load replay buffer
         replay_buffer = generate_artificial_replay_buffer_for_training()
 
@@ -638,9 +640,17 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 #train_dqn_agent()                   # <--- REAL SELF PLAY
 train_on_synthetic_replay_buffer()  # <--- SYNTHETIC EXPERIENCE
 plot_training_metrics(
-    loss_history, q_magnitude_history, q_magnitude_history_win_loss,
-    unique_states_history, win_rate_vs_rand_hist, dead_neuron_cnt_hist,
-    exploding_neuron_cnt_hist, grad_history, eval_freq=10)
+    loss_history,
+    q_magnitude_history,
+    q_magnitude_history_win_loss,
+    unique_states_history,
+    win_rate_vs_rand_hist,
+    dead_neuron_cnt_hist,
+    exploding_neuron_cnt_hist,
+    grad_history,
+    eval_freq=10)
+
+
 
 # *****************************************************************
 # Save the policy 
@@ -648,11 +658,38 @@ plot_training_metrics(
 
 
 # *****************************************************************
-# Test the policy 
+# Test the trained policy 
 # *****************************************************************
-# Test 1: Three in a row - see if Q-values switch depending on whose move it is
-examples = get_training_examples()
+# Test 1: Test on cases in the replay buffer
+test_sample = [0, 1]         # Choose which item in the replay buffer to use
+test_batch_size = len(test_sample)     # Choose a single item from the replay buffer to test
 
+#examples = get_training_examples()
+replay_buffer = generate_artificial_replay_buffer_for_training()
+print( "Test Synthetic Replay Buffer Loaded!  Length: ", len( replay_buffer) )
+
+replay_sample = replay_buffer.sample( test_batch_size, test_sample )
+# print( initial_sample )
+
+state = replay_sample[0]
+print( "Sample state:")
+print( state )
+print( "Sample action: ", replay_sample[1] )
+print( "Sample reward: ", replay_sample[2])
+state_tensor = torch.FloatTensor(state).to('cpu')
+with torch.no_grad():
+    q_values = forward(state_tensor)
+print( "Q Values on synthetic test state: ", q_values )
+
+print( "Sample flipped state:")
+state = state[:, [1, 0], :, :]
+print( state )
+state_tensor = torch.FloatTensor(state).to('cpu')
+with torch.no_grad():
+    q_values = forward(state_tensor)
+print( "Q Values on REVERSED test state: ", q_values )
+
+"""
 initial_board = examples[example_test_case]['board']
 players = examples[example_test_case]['players']
 env.set_state( initial_board, players[0] )
@@ -664,7 +701,7 @@ print( "Initial Board as stored in environment" )
 print( env.get_state() )
 print( "Test Inference ")
 q_values = forward(env.get_state())
-print( "Initial Q Values: ", q_values )
+print( "Q Values on initial board state: ", q_values )
 
 print( "Switched player")
 env.set_state( initial_board, players[1] )
@@ -678,3 +715,4 @@ print( env.get_state() )
 print( "Test Inference ")
 q_values = forward(env.get_state())
 print( "Q Values on flipped state: ", q_values )
+"""
