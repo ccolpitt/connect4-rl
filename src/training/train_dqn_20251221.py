@@ -81,40 +81,70 @@ print( replay_buffer.sample(1,[-2]))
 # *****************************************************************
 # Create Network
 # *****************************************************************
-device = torch.device('cpu')
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
+import torch
+import torch.nn as nn
+import copy
 
-conv1 = nn.Conv2d(2, 32, kernel_size=3, padding=1)
-bn1 = nn.BatchNorm2d(32)
-dr1 = nn.Dropout2d(p=config.DROPOUT_RATE)
-conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-bn2 = nn.BatchNorm2d(64)
-dr2 = nn.Dropout2d(p=config.DROPOUT_RATE)
-fc1 = nn.Linear(64 * 6 * 7, 128)
-dr3 = nn.Dropout(p=config.DROPOUT_RATE)
-output = nn.Linear(128, 7)
-
-# He initialization
-for layer in [conv1, conv2, fc1, output]:
-    if hasattr(layer, 'weight'):
-        nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
-        nn.init.constant_(layer.bias, 0)
-
-def forward(x):
-    # Ensure input is a Float Tensor and has a batch dimension
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x).float()
-    if x.dim() == 3:
-        x = x.unsqueeze(0) # Change (2,6,7) to (1,2,6,7)
+class Connect4Net(nn.Module):
+    def __init__(self, device, dropout_rate=0.2):
+        super(Connect4Net, self).__init__()
+        self.device = device
         
-    x = torch.relu(bn1(conv1(x)))
-    x = dr1(x)
-    x = torch.relu(bn2(conv2(x)))
-    x = dr2(x)
-    x = x.view(x.size(0), -1)
-    x = torch.relu(fc1(x))
-    x = dr3(x)
-    return output(x)
+        # Define layers
+        self.conv1 = nn.Conv2d(2, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.dr1 = nn.Dropout2d(p=dropout_rate)
+        
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.dr2 = nn.Dropout2d(p=dropout_rate)
+        
+        self.fc1 = nn.Linear(64 * 6 * 7, 128)
+        self.dr3 = nn.Dropout(p=dropout_rate)
+        self.output = nn.Linear(128, 7)
+
+        # Apply He initialization
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        
+        # Move the entire model to the specified device immediately
+        self.to(self.device)
+
+    def forward(self, x):
+        # 1. Convert NumPy to Tensor if needed
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x).float()
+        
+        # 2. Ensure input is on the SAME device as the model layers
+        x = x.to(self.device)
+        
+        # 3. Handle batch dimension
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+            
+        x = torch.relu(self.bn1(self.conv1(x)))
+        x = self.dr1(x)
+        x = torch.relu(self.bn2(self.conv2(x)))
+        x = self.dr2(x)
+        x = x.view(x.size(0), -1)
+        x = torch.relu(self.fc1(x))
+        x = self.dr3(x)
+        return self.output(x)
+    
+# Initialize models
+my_device = torch.device("cpu")
+policy_net = Connect4Net(device=my_device, dropout_rate=config.DROPOUT_RATE)
+target_net = Connect4Net(device=my_device, dropout_rate=config.DROPOUT_RATE)
+
+# Sync weights
+target_net.load_state_dict(policy_net.state_dict())
+target_net.eval()
+
+# Simplified Optimizer
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate)
 
 # *****************************************************************
 # Test inference works with the function defined.  Pull examples from the notebook dir.
@@ -131,31 +161,22 @@ project_root = current_file.parent.parent.parent
 # import training examples
 from notebooks.training_examples_last_2_moves_20251221 import get_training_examples
 
+"""
 examples = get_training_examples()
 
 initial_board = examples[example_test_case]['board']
 players = examples[example_test_case]['players']
 env.set_state( initial_board, players[0] )
 
-"""
 print( "Initial board ")
 print( initial_board)
 print( "Initial Player: ", players[0] )
 print( "Initial Board as stored in environment" )
 print( env.get_state() )
 print( "Test Inference ")
-q_values = forward(env.get_state())
+state_tensor = torch.FloatTensor(env.get_state()).to(Config.DEVICE)
+q_values = target_net(state_tensor)
 print( "Initial Q Values: ", q_values )
-
-print( "Flipped Board")
-initial_board = -1 * initial_board
-print( initial_board)
-env.set_state( initial_board, players[0] )
-print( "Flipped Board as stored in environment" )
-print( env.get_state() )
-print( "Test Inference ")
-q_values = forward(env.get_state())
-print( "Q Values on flipped state: ", q_values )
 """
 
 
@@ -307,24 +328,6 @@ def get_action_mask(legal_moves):
 # *****************************************************************
 # Training Loop, Function: 
 # *****************************************************************
-# prelearn: Set to training mode
-conv1.train()
-bn1.train()
-dr1.train()
-conv2.train()
-bn2.train()
-dr2.train()
-fc1.train()
-dr3.train()
-output.train()
-
-# prelearn: I think this is to track NN weight and gradient health    
-all_params = list(conv1.parameters()) + list(bn1.parameters()) + \
-    list(conv2.parameters()) + list(bn2.parameters()) + \
-    list(fc1.parameters()) + list(output.parameters())
-    
-# prelearn: Back propagation optimizer
-optimizer = torch.optim.Adam(all_params, lr=learning_rate)
 
 # Initialize learning result metrics
 loss_history = []           # 1: Should decrease
@@ -337,6 +340,7 @@ exploding_neuron_cnt_hist = []  # 7: Should stay constant
 grad_history = []           # 8: Should stay constant, or decrease
 unique_states_seen = set()
 
+"""
 def train_dqn_agent():
     for episode in range(1, num_episodes + 1):
         # Play a single game, add moves to replay buffer
@@ -449,12 +453,79 @@ def train_dqn_agent():
                 dead_neuron_cnt_hist.append(dead_neuron_cnt)   # 6: Should stay constant
                 exploding_neuron_cnt_hist.append(exploding_neuron_cnt)  # 7: Should stay constant
                 grad_history.append(avg_grad)                       # 8 Scalar
+"""
+                
 
 # Synthetic training with a contrived replay buffer - prove that the network will learn
 # win and loss
 
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
+import copy
+def train_on_synthetic_replay_buffer(policy_net, optimizer):
+    # 1. SETUP: Move buffer generation OUTSIDE the loop
+    replay_buffer = generate_artificial_replay_buffer_for_training()
+    batch_size = 16 
+    
+    # 2. TARGET NETWORK: Create a frozen copy of your model
+    # We use deepcopy to ensure it has its own separate weights
+    target_net = copy.deepcopy(policy_net) 
+    target_net.eval() # Target net never calculates gradients or updates BatchNorm stats
 
+    # Generate the batch ONCE since the data is synthetic/static
+    states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
+    
+    # Convert to tensors once and move to device
+    s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
+    a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
+    r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
+    ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
+    d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
+    m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
+
+    # IMPORTANT: Put policy_net in training mode (enables Dropout and BatchNorm updates)
+    policy_net.train()
+
+    for episode in range(1, num_episodes + 1):
+        # 3. CALCULATE TARGETS: Use the FROZEN target_net
+        with torch.no_grad():
+            # Use target_net for future predictions
+            next_q_values = target_net(ns_batch) 
+            masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
+            next_q_max = masked_next_q.max(dim=1)[0]
+            
+            # Negamax target: target = r - gamma * max(Q_next)
+            target_q = r_batch - (1 - d_batch) * gamma * next_q_max
+
+        # 4. GRADIENT STEP
+        optimizer.zero_grad()
+        
+        # Forward pass on POLICY net (using the __call__ method of the class)
+        q_values = policy_net(s_batch)
+        predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
+        
+        loss = nn.functional.mse_loss(predicted_qs, target_q)
+        loss.backward()
+        
+        # Optional: Gradient clipping is often helpful for DQN stability
+        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+
+        # 5. SYNC: Periodically copy policy weights to target weights
+        if episode % 100 == 0:
+            target_net.load_state_dict(policy_net.state_dict())
+            # For monitoring, switch to eval mode briefly to see 'clean' Q-values
+            policy_net.eval()
+            with torch.no_grad():
+                test_q = policy_net(s_batch).gather(1, a_batch.unsqueeze(1)).squeeze(1)
+                avg_q = test_q.mean().item()
+            policy_net.train()
+            
+            print(f"Episode {episode} | Loss: {loss.item():.6f} | Q-Avg (Terminals): {avg_q:.2f}")
+
+    return policy_net
+
+"""
 def train_on_synthetic_replay_buffer():
     # load replay buffer
     replay_buffer = generate_artificial_replay_buffer_for_training()
@@ -562,7 +633,7 @@ def train_on_synthetic_replay_buffer():
                 dead_neuron_cnt_hist.append(dead_neuron_cnt)   # 6: Should stay constant
                 exploding_neuron_cnt_hist.append(exploding_neuron_cnt)  # 7: Should stay constant
                 grad_history.append(avg_grad)                       # 8 Scalar
-
+"""
 
 # *****************************************************************
 # Function to show result metrics 
@@ -638,7 +709,8 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 # Train, show results
 # *****************************************************************
 #train_dqn_agent()                   # <--- REAL SELF PLAY
-train_on_synthetic_replay_buffer()  # <--- SYNTHETIC EXPERIENCE
+train_on_synthetic_replay_buffer(policy_net, optimizer)  # <--- SYNTHETIC EXPERIENCE
+
 plot_training_metrics(
     loss_history,
     q_magnitude_history,
@@ -678,7 +750,7 @@ print( "Sample action: ", replay_sample[1] )
 print( "Sample reward: ", replay_sample[2])
 state_tensor = torch.FloatTensor(state).to('cpu')
 with torch.no_grad():
-    q_values = forward(state_tensor)
+    q_values = policy_net(state_tensor)
 print( "Q Values on synthetic test state: ", q_values )
 
 print( "Sample flipped state:")
@@ -686,7 +758,7 @@ state = state[:, [1, 0], :, :]
 print( state )
 state_tensor = torch.FloatTensor(state).to('cpu')
 with torch.no_grad():
-    q_values = forward(state_tensor)
+    q_values = policy_net(state_tensor)
 print( "Q Values on REVERSED test state: ", q_values )
 
 """

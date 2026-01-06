@@ -21,7 +21,9 @@ class Config:
         DRAW_VALUE (int): Value returned for draw games (0)
         DEVICE (torch.device): Computing device (CPU/CUDA/MPS)
     """
-    
+    # Processor
+    DEVICE = "cpu"
+
     # Game dimensions
     ROWS = 6
     COLS = 7
