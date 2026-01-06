@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Constants
 # *****************************************************************
-num_episodes                = 250   # Number of games to train on
+num_episodes                = 200   # Number of games to train on
 batch_size                  = 16
 learning_rate               = 0.00001
 training_iterations         = 1     # Training per game
@@ -184,43 +184,34 @@ print( "Initial Q Values: ", q_values )
 # Select Action - Keep it simple to start
 # *****************************************************************
 def select_action(state, legal_moves, eps) -> int:
-    """
-    Implements epsilon-greedy action selection with illegal move masking.
-    
-    Args:
-        state (torch.Tensor): 2x6x7 board state.
-        legal_moves (list/np.array): List of valid column indices.
-        eps (float): Probability of choosing a random action.
-        
-    Returns:
-        int: The chosen action (0-6).
-    """
     # 1. EXPLORATION: Randomly choose from legal moves
     if np.random.random() < eps:
         return int(np.random.choice(legal_moves))
-    # 2. EXPLOITATION: Choose best action based on Q-values
-    # Ensure we don't track gradients during inference
+        
+    # 2. EXPLOITATION: 
+    # CRITICAL: Switch to eval mode to disable Dropout/BatchNorm noise
+    policy_net.eval() 
+    
     with torch.no_grad():
-        # Add batch dimension: (2, 6, 7) -> (1, 2, 6, 7)
-        # Squeeze the output back to (7,)
-        q_values = forward(state.unsqueeze(0)).squeeze(0)
+        # The class handles unsqueeze and .to(device) internally now, 
+        # but calling it here is fine for clarity.
+        q_values = policy_net(state).squeeze(0)
         
-        # MASKING: We want to ignore moves that are illegal.
-        # We create a copy and set illegal moves to a very small value.
+        # MASKING
         masked_q = q_values.clone()
-        
-        # Create a set of all possible actions and find the illegal ones
         all_actions = set(range(7))
         illegal_actions = list(all_actions - set(legal_moves))
         
-        # Set illegal moves to -infinity (or a very large negative number)
-        # so they can never be the argmax.
+        # Using a very large negative ensures illegal moves aren't picked
         masked_q[illegal_actions] = -1e9
         
-        # 3. Choose the action with the highest estimated Q-value
         best_action = torch.argmax(masked_q).item()
         
-        return int(best_action)
+    # Note: We don't call .train() here because this function is also 
+    # used during evaluation. We let the training loop handle switching 
+    # back to .train() when it's ready to update weights.
+    
+    return int(best_action)
     
 
 # *****************************************************************
@@ -462,19 +453,14 @@ def train_dqn_agent():
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
 import copy
 def train_on_synthetic_replay_buffer(policy_net, optimizer):
-    # 1. SETUP: Move buffer generation OUTSIDE the loop
+    # 1. SETUP: Static buffer and target net
     replay_buffer = generate_artificial_replay_buffer_for_training()
     batch_size = 16 
-    
-    # 2. TARGET NETWORK: Create a frozen copy of your model
-    # We use deepcopy to ensure it has its own separate weights
     target_net = copy.deepcopy(policy_net) 
-    target_net.eval() # Target net never calculates gradients or updates BatchNorm stats
+    target_net.eval()
 
-    # Generate the batch ONCE since the data is synthetic/static
+    # Move batch to device once
     states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
-    
-    # Convert to tensors once and move to device
     s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
     a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
     r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
@@ -482,158 +468,73 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
     d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
     m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
 
-    # IMPORTANT: Put policy_net in training mode (enables Dropout and BatchNorm updates)
     policy_net.train()
 
     for episode in range(1, num_episodes + 1):
-        # 3. CALCULATE TARGETS: Use the FROZEN target_net
+        # 3. CALCULATE TARGETS
         with torch.no_grad():
-            # Use target_net for future predictions
             next_q_values = target_net(ns_batch) 
             masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
             next_q_max = masked_next_q.max(dim=1)[0]
-            
-            # Negamax target: target = r - gamma * max(Q_next)
             target_q = r_batch - (1 - d_batch) * gamma * next_q_max
 
         # 4. GRADIENT STEP
         optimizer.zero_grad()
-        
-        # Forward pass on POLICY net (using the __call__ method of the class)
         q_values = policy_net(s_batch)
         predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
         
         loss = nn.functional.mse_loss(predicted_qs, target_q)
         loss.backward()
-        
-        # Optional: Gradient clipping is often helpful for DQN stability
         torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
-        
         optimizer.step()
 
-        # 5. SYNC: Periodically copy policy weights to target weights
+        # --- POPULATE METRICS ---
+        # 1. Loss
+        loss_history.append(loss.item())
+
+        # 2. Avg Absolute Magnitude of ALL Q-values in the batch
+        q_magnitude_history.append(torch.mean(torch.abs(q_values)).item())
+
+        # 3. Avg Absolute Magnitude of the Q-values for the CHOSEN moves
+        q_magnitude_history_win_loss.append(torch.mean(torch.abs(predicted_qs)).item())
+
+        # 4. Unique States (Static at 16 for this test)
+        unique_states_history.append(batch_size)
+
+        # 5. Win Rate vs Random (Every 20 episodes)
+        if episode % 20 == 0:
+            # Note: evaluate_vs_random should call policy_net.eval() internally
+            win_rate = evaluate_vs_random(num_games=20)
+            win_rate_vs_rand_hist.append(win_rate)
+            policy_net.train() # Switch back to training mode after eval
+
+        # 6 & 7. Neuron Health (Weights Health)
+        with torch.no_grad():
+            all_weights = torch.cat([p.view(-1) for p in policy_net.parameters()])
+            total_params = all_weights.numel()
+            
+            dead_neurons = (torch.abs(all_weights) < 0.01).sum().item()
+            exploding_neurons = (torch.abs(all_weights) > 10.0).sum().item()
+            
+            dead_neuron_cnt_hist.append(dead_neurons / total_params) # Stored as %
+            exploding_neuron_cnt_hist.append(exploding_neurons / total_params)
+
+        # 8. Average Gradient Magnitude
+        total_grad = 0.0
+        grad_count = 0
+        for p in policy_net.parameters():
+            if p.grad is not None:
+                total_grad += p.grad.abs().sum().item()
+                grad_count += p.grad.numel()
+        grad_history.append(total_grad / grad_count if grad_count > 0 else 0)
+
+        # 5. SYNC TARGET NETWORK
         if episode % 100 == 0:
             target_net.load_state_dict(policy_net.state_dict())
-            # For monitoring, switch to eval mode briefly to see 'clean' Q-values
-            policy_net.eval()
-            with torch.no_grad():
-                test_q = policy_net(s_batch).gather(1, a_batch.unsqueeze(1)).squeeze(1)
-                avg_q = test_q.mean().item()
-            policy_net.train()
-            
-            print(f"Episode {episode} | Loss: {loss.item():.6f} | Q-Avg (Terminals): {avg_q:.2f}")
+            print(f"Ep {episode} | Loss: {loss.item():.4f} | Q-Mag: {q_magnitude_history[-1]:.2f} | Grad: {grad_history[-1]:.6f}")
 
     return policy_net
 
-"""
-def train_on_synthetic_replay_buffer():
-    # load replay buffer
-    replay_buffer = generate_artificial_replay_buffer_for_training()
-    print( "Synthetic Replay Buffer Generated!  Len: ", len( replay_buffer))
-    if replay_buffer.is_ready( 16 ):
-        # Sample from replay buffer
-        states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
-            
-        # Convert samples to pytorch tensors
-        start_state_tensor_batch = torch.FloatTensor(states).to('cpu')
-        actions_batch = torch.LongTensor(actions).to('cpu')
-        rewards_tensor_batch = torch.FloatTensor(rewards).to('cpu')
-        next_state_tensor_batch = torch.FloatTensor(next_states).to('cpu')
-        dones_tensor_batch = torch.FloatTensor(dones).to('cpu')
-        next_masks_tensor_batch = torch.FloatTensor(next_masks).to('cpu')
-
-    for episode in range(1, num_episodes + 1): # fake game - we just pre-load replay buffer
-        replay_buffer = generate_artificial_replay_buffer_for_training()
-
-        # Check if enough data to train the network.  Train if enough
-        if replay_buffer.is_ready( batch_size ):
-            # Sample from replay buffer
-            states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
-            
-            # Convert samples to pytorch tensors
-            start_state_tensor_batch = torch.FloatTensor(states).to('cpu')
-            actions_batch = torch.LongTensor(actions).to('cpu')
-            rewards_tensor_batch = torch.FloatTensor(rewards).to('cpu')
-            next_state_tensor_batch = torch.FloatTensor(next_states).to('cpu')
-            dones_tensor_batch = torch.FloatTensor(dones).to('cpu')
-            next_masks_tensor_batch = torch.FloatTensor(next_masks).to('cpu')
-
-            # Calculate target Q values - note this stays the same for each batch
-            # Bellman Equation, with negamax logic
-            with torch.no_grad():
-                next_q_max = get_next_q_masked(next_state_tensor_batch, next_masks_tensor_batch)
-                target_q = rewards_tensor_batch - (1 - dones_tensor_batch) * gamma * next_q_max
-
-            # Train training_iterations times    
-            for iteration in range(training_iterations):
-                # Forward pass
-                q_values = forward( start_state_tensor_batch ) # To Do: Make this dtype=torch.float32
-                predicted_qs = q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
-
-                #print( "SAMPLE PREDICTED Q VALUES")
-                #print( predicted_qs )
-                #print( "SAMPLE SUM PREDICTED Q's")
-                #print( torch.sum( predicted_qs ))
-                #break
-
-                # Calculate loss between actual Q-value predictions (predicted_qs), and targets (which stay the same
-                # over all episodes)
-                # METRIC 1
-                loss = nn.functional.mse_loss(predicted_qs, target_q )
-
-                # Backward pass --> I think this is where the real learning happens
-                optimizer.zero_grad()   # Zero the gradients
-                loss.backward()         # Back propagate loss gradients through the NN - ie - calculate gradients
-
-                # Update NN weights -- THIS IS LEARNING - GREY MATTER UPDATE
-                optimizer.step()
-                
-                # TRAINING METRICS
-                # METRIC 2: average magnitude of all Q-values
-                q_magnitude = torch.mean(torch.abs(q_values[0])).item()
-                # q_magnitude = torch.mean(torch.abs(q_values)).item()
-
-                # METRIC 3: Calculate avg magnitude of Q vals where state is win or loss
-                terminal_indices = (dones_tensor_batch == 1).nonzero(as_tuple=True)[0]
-                if len(terminal_indices) > 0:
-                    terminal_q_avg = torch.mean(torch.abs(predicted_qs[terminal_indices])).item()
-                else:
-                    terminal_q_avg = 0.0
-                
-                # METRIC 4: Unique States
-                unique_states = len( unique_states_seen )
-
-                # METRIC 5: Win vs. Random Agent
-                if episode % evaluation_frequency == 0:
-                    win_rate_vs_random_pct = evaluate_vs_random(eval_vs_random_game_count)
-                
-                # METRIC 6, 7: Dead/Exploding Neurons (using 'output' layer weights as proxy)
-                # To Do: Include all neurons
-                with torch.no_grad():
-                    weights = output.weight.data
-                    dead_neuron_cnt = torch.sum(torch.abs(weights) < 0.001).item()
-                    exploding_neuron_cnt = torch.sum(torch.abs(weights) > 10.0).item()
-
-                # Calculate average gradient across all parameters
-                total_grad = 0.0
-                total_params = 0
-                for param in all_params:
-                    if param.grad is not None:
-                        total_grad += torch.sum(torch.abs(param.grad)).item()
-                        total_params += param.grad.numel()
-                avg_grad = total_grad / total_params if total_params > 0 else 0.0
-
-                # STORE RESULTS
-                loss_history.append(loss.item())            # 1: scalar
-                q_magnitude_history.append(q_magnitude)     # 2: scalar
-                q_magnitude_history_win_loss.append(terminal_q_avg)   #3: scalar
-                unique_states_history.append(unique_states)  # 4: Should increase
-                if episode % evaluation_frequency == 0:
-                    win_rate_vs_rand_hist.append(win_rate_vs_random_pct)     # 5: Should increase from 50% to 100%
-                dead_neuron_cnt_hist.append(dead_neuron_cnt)   # 6: Should stay constant
-                exploding_neuron_cnt_hist.append(exploding_neuron_cnt)  # 7: Should stay constant
-                grad_history.append(avg_grad)                       # 8 Scalar
-"""
 
 # *****************************************************************
 # Function to show result metrics 
@@ -689,7 +590,7 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 
     # --- Plot 5: NN Health (Combined Dead/Exploding) ---
     ax = axes[1, 1]
-    ax.plot(episodes, dead_hist, label='Dead (<0.001)', color='black')
+    ax.plot(episodes, dead_hist, label='Dead (<0.01)', color='black')
     ax.plot(episodes, exploding_hist, label='Exploding (>10)', color='red')
     ax.set_title('Neuron Health (Weight Counts)')
     ax.legend()
@@ -748,17 +649,25 @@ print( "Sample state:")
 print( state )
 print( "Sample action: ", replay_sample[1] )
 print( "Sample reward: ", replay_sample[2])
-state_tensor = torch.FloatTensor(state).to('cpu')
+# Simplified test call
+policy_net.eval() # CRITICAL for test consistency!
 with torch.no_grad():
-    q_values = policy_net(state_tensor)
+    q_values = policy_net(state) # The class handles the rest
+#
+#state_tensor = torch.FloatTensor(state).to('cpu')
+#with torch.no_grad():
+#    q_values = policy_net(state_tensor)
 print( "Q Values on synthetic test state: ", q_values )
 
 print( "Sample flipped state:")
 state = state[:, [1, 0], :, :]
 print( state )
-state_tensor = torch.FloatTensor(state).to('cpu')
+policy_net.eval() # CRITICAL for test consistency!
 with torch.no_grad():
-    q_values = policy_net(state_tensor)
+    q_values = policy_net(state) # The class handles the rest
+#state_tensor = torch.FloatTensor(state).to('cpu')
+#with torch.no_grad():
+#    q_values = policy_net(state_tensor)
 print( "Q Values on REVERSED test state: ", q_values )
 
 """
