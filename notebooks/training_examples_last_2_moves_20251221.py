@@ -254,8 +254,8 @@ def generate_artificial_replay_buffer_for_training():
     examples = get_training_examples()
     env.reset()
     done = False
-    moves = 0
-    eps = config.EPS
+    #moves = 0
+    #eps = config.EPS
 
     # loop through test examples
     for example in examples:

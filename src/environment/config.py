@@ -37,25 +37,26 @@ class Config:
     # Neural Net Constants
     DROPOUT_RATE = 0.0
 
-    # Neural Net Constants
-    NUM_GAME_EPISODES = 1
-
-    # Neural Net Constants
-    EPS = .5
-
     # Training Constants
-    TRAIN_EVERY_N_GAMES = 1
-    SAMPLE_SIZE = 64
+    NUM_EPISODES = 5000
+    EPS_START   = 0.5
+    EPS_END     = 0.05
+    EPS_DECAY   = 0.999
+    BATCH_SIZE  = 128
+    TRAIN_N_TIMES_PER_GAME  = 1
+    GAMMA       = 0.99
+    TARGET_UPDATE_FREQ      = 100
     
 
 
     
     # Device configuration
-    DEVICE = torch.device(
-        "mps" if torch.backends.mps.is_available() 
-        else "cuda" if torch.cuda.is_available() 
-        else "cpu"
-    )
+    DEVICE = torch.device( "cpu" ) # hardcode to CPU.  We can change to MPS later.
+    #DEVICE = torch.device(
+    #    "mps" if torch.backends.mps.is_available() 
+    #    else "cuda" if torch.cuda.is_available() 
+    #    else "cpu"
+    #)
     
     def __repr__(self):
         """String representation of configuration."""

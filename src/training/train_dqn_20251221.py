@@ -178,12 +178,60 @@ state_tensor = torch.FloatTensor(env.get_state()).to(Config.DEVICE)
 q_values = target_net(state_tensor)
 print( "Initial Q Values: ", q_values )
 """
+# *****************************************************************
+# Helper functions, for training and metric tracking
+# *****************************************************************
+# Helper to hash states for Metric 4
+def hash_state(state):
+    return state.tobytes()
+
+# Helper for Metric 6 (Placeholder - ensure you have a random agent function)
+def evaluate_vs_random(policy_net = policy_net, num_games=20):
+    wins = 0
+    for _ in range(num_games):
+        env.reset()
+        done = False
+        while not done:
+            state = env.get_state()
+            legal = env.get_legal_moves()
+            # Agent move (Greedy)
+            action = select_action(policy_net, torch.tensor(state, dtype=torch.float32), legal, eps=0.0)
+            _, reward, done = env.play_move(action)
+            if done and reward == 1:
+                wins += 1
+                break
+            if done: break # Draw or loss
+            
+            # Random move
+            legal = env.get_legal_moves()
+            action = np.random.choice(legal)
+            _, reward, done = env.play_move(action)
+            if done and reward == 1: # Random agent won
+                break 
+    return wins / num_games
+
+def get_next_q_masked(next_states, next_legal_masks):
+    with torch.no_grad():
+        # next_q_values shape: (batch_size, 7)
+        next_q_values = forward(next_states)
+        
+        # Apply mask: set illegal moves to -1e9
+        # next_legal_masks should be a tensor (batch_size, 7) where 1=legal, 0=illegal
+        masked_q = next_q_values.masked_fill(next_legal_masks == 0, -1e9)
+        
+        return masked_q.max(dim=1)[0]
+
+def get_action_mask(legal_moves):
+    """Converts [0, 1, 3] into [1, 1, 0, 1, 0, 0, 0]"""
+    mask = np.zeros(7, dtype=np.float32)
+    mask[legal_moves] = 1.0
+    return mask
 
 
 # *****************************************************************
 # Select Action - Keep it simple to start
 # *****************************************************************
-def select_action(state, legal_moves, eps) -> int:
+def select_action(policy_net, state, legal_moves, eps) -> int:
     # 1. EXPLORATION: Randomly choose from legal moves
     if np.random.random() < eps:
         return int(np.random.choice(legal_moves))
@@ -217,11 +265,51 @@ def select_action(state, legal_moves, eps) -> int:
 # *****************************************************************
 # Self Play.  Use eps-greedy
 # *****************************************************************
-def play_self_play_game():
+def play_self_play_game(policy_net, eps=0.5):
+    env.reset()
+    done = False
+    moves_count = 0
+    game_states = [] # To return to the training loop for unique state tracking
+
+    while not done and moves_count < 42:
+        state = env.get_state()
+        game_states.append(state)
+        
+        legal_moves = env.get_legal_moves()
+        
+        # 1. Select Action (Note: Pass policy_net, state, and legal_moves)
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+        action = select_action(policy_net, state_tensor, legal_moves, eps)
+        
+        # 2. Execute Move
+        next_state, reward, done = env.play_move(action)
+        
+        # 3. Handle Masking for the NEXT player
+        if not done:
+            next_legal_moves = env.get_legal_moves()
+            next_mask = get_action_mask(next_legal_moves)
+        else:
+            # No legal moves after game ends
+            next_mask = np.zeros(7, dtype=np.float32)
+
+        # 4. Add to Replay Buffer
+        replay_buffer.add(state, action, reward, next_state, done, next_mask)
+        moves_count += 1
+    
+    # 5. THE BELLMAN NEGATIVE REWARD FIX
+    # In Connect 4, if the last move resulted in 1.0 (Win), 
+    # the move immediately before that by the opponent was a Loss (-1.0).
+    if reward == 1.0:
+        # We reach into the buffer and update the transition for the opponent
+        # -2 refers to the second-to-last item added to the buffer
+        replay_buffer.update_penalty(index=-2, new_reward=-1.0, is_done=True)
+    
+    return game_states
+"""
+def play_self_play_game(policy_net, eps = 0.5):
     env.reset()
     done = False
     moves = 0
-    eps = config.EPS
 
     # loop through moves
     while not done and moves < 42:
@@ -231,7 +319,7 @@ def play_self_play_game():
         
         # Eps greedy
         state_tensor = torch.tensor(state, dtype=torch.float32)
-        action = select_action(state_tensor, legal_moves, eps)
+        action = select_action(policy_net, state_tensor, legal_moves, eps)
         # Make the move
         next_state, reward, done = env.play_move( action )
         # Get mask for the NEXT player ---
@@ -250,71 +338,23 @@ def play_self_play_game():
         replay_buffer.update_penalty(-2, -1, True )
         #print( "SECOND TO LAST")
         #print( replay_buffer.buffer[-2] )
-
+"""
+"""
 # Test out Self Play Game
-#play_self_play_game()
+play_self_play_game(policy_net, eps=0.5)
 
 # After self play game, print result
-#print( "Final State:" )
-#print( env.get_state() )
-#print( env.get_current_player() )
+print( "Final State:" )
+print( env.get_state() )
+print( env.get_current_player() )
 
-#print( "Last Replay Buffer Entry: ")
-#print( replay_buffer.buffer[-1] )
+print( "Last Replay Buffer Entry: ")
+print( replay_buffer.buffer[-1] )
 
-#print( "Second to Last Replay Buffer Entry: ")
-#replay_buffer.buffer[-2]["reward"] = -1 # Update reward
-#print( replay_buffer.buffer[-2] )
-
-
-# *****************************************************************
-# Helper functions, for training and metric tracking
-# *****************************************************************
-# Helper to hash states for Metric 4
-def hash_state(state):
-    return state.tobytes()
-
-# Helper for Metric 6 (Placeholder - ensure you have a random agent function)
-def evaluate_vs_random(num_games=20):
-    wins = 0
-    for _ in range(num_games):
-        env.reset()
-        done = False
-        while not done:
-            state = env.get_state()
-            legal = env.get_legal_moves()
-            # Agent move (Greedy)
-            action = select_action(torch.tensor(state, dtype=torch.float32), legal, eps=0.0)
-            _, reward, done = env.play_move(action)
-            if done and reward == 1:
-                wins += 1
-                break
-            if done: break # Draw or loss
-            
-            # Random move
-            legal = env.get_legal_moves()
-            action = np.random.choice(legal)
-            _, reward, done = env.play_move(action)
-            if done and reward == 1: # Random agent won
-                break 
-    return wins / num_games
-
-def get_next_q_masked(next_states, next_legal_masks):
-    with torch.no_grad():
-        # next_q_values shape: (batch_size, 7)
-        next_q_values = forward(next_states)
-        
-        # Apply mask: set illegal moves to -1e9
-        # next_legal_masks should be a tensor (batch_size, 7) where 1=legal, 0=illegal
-        masked_q = next_q_values.masked_fill(next_legal_masks == 0, -1e9)
-        
-        return masked_q.max(dim=1)[0]
-
-def get_action_mask(legal_moves):
-    """Converts [0, 1, 3] into [1, 1, 0, 1, 0, 0, 0]"""
-    mask = np.zeros(7, dtype=np.float32)
-    mask[legal_moves] = 1.0
-    return mask
+print( "Second to Last Replay Buffer Entry: ")
+replay_buffer.buffer[-2]["reward"] = -1 # Update reward
+print( replay_buffer.buffer[-2] )
+"""
 
 # *****************************************************************
 # Training Loop, Function: 
@@ -331,119 +371,181 @@ exploding_neuron_cnt_hist = []  # 7: Should stay constant
 grad_history = []           # 8: Should stay constant, or decrease
 unique_states_seen = set()
 
-"""
-def train_dqn_agent():
-    for episode in range(1, num_episodes + 1):
-        # Play a single game, add moves to replay buffer
-        play_self_play_game()
-        if( episode % evaluation_frequency == 0 ):
-            print( "Episode ", episode, ".  ReplayBuffLen: ", replay_buffer.__len__())
-
-        # Check if enough data to train the network.  Train if enough
-        if replay_buffer.is_ready( batch_size ):
-            # Sample from replay buffer
-            states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
+def train_dqn_agent(policy_net, optimizer, config):
+    # 1. SETUP
+    target_net = copy.deepcopy(policy_net) 
+    target_net.eval()
+    
+    eps = config.EPS_START 
+    
+    for episode in range(1, config.NUM_EPISODES + 1):
+        # 2. SELF PLAY
+        new_states_seen = play_self_play_game(policy_net, eps) 
+        
+        for s in new_states_seen:
+            unique_states_seen.add(s.tobytes()) 
             
-            # Convert samples to pytorch tensors
-            start_state_tensor_batch = torch.FloatTensor(states).to('cpu')
-            actions_batch = torch.LongTensor(actions).to('cpu')
-            rewards_tensor_batch = torch.FloatTensor(rewards).to('cpu')
-            next_state_tensor_batch = torch.FloatTensor(next_states).to('cpu')
-            dones_tensor_batch = torch.FloatTensor(dones).to('cpu')
-            next_masks_tensor_batch = torch.FloatTensor(next_masks).to('cpu')
+        # 3. EPSILON DECAY
+        eps = max(config.EPS_END, eps * config.EPS_DECAY)
+
+        # 4. TRAINING LOOP
+        if replay_buffer.is_ready(config.BATCH_SIZE):
+            policy_net.train()
             
-            #print( "REPLAY BUFFER SAMPLE")
-            #print( "Start State Tensor Batch", start_state_tensor_batch )
-            #break
+            # We track the 'last' values of the loop to append to history
+            last_loss = 0
+            last_q_values = None
+            last_predicted_qs = None
+            last_dones = None
 
-            # Calculate target Q values - note this stays the same for each batch
-            # Bellman Equation, with negamax logic
-            with torch.no_grad():
-                #next_q_values = forward(next_state_tensor_batch)
-                #next_q_max = next_q_values.max(dim=1)[0]
-                #target_q = rewards_tensor_batch - (1 - dones_tensor_batch) * gamma * next_q_max
+            for _ in range(config.TRAIN_N_TIMES_PER_GAME): 
+                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
+                
+                s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
+                a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
+                r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
+                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
+                d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
+                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
 
-                # Use the masked max
-                next_q_max = get_next_q_masked(next_state_tensor_batch, next_masks_tensor_batch)
-                target_q = rewards_tensor_batch - (1 - dones_tensor_batch) * gamma * next_q_max
+                with torch.no_grad():
+                    next_q_values = target_net(ns_batch) 
+                    masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
+                    next_q_max = masked_next_q.max(dim=1)[0]
+                    target_q = r_batch + (config.GAMMA * next_q_max * (1 - d_batch))
 
-            #print( "SAMPLE DONES")
-            #print( dones_tensor_batch )
-            #print( "SAMPLE TARGET Q VALUES:")
-            #print( target_q )
-            #print( "SAMPLE SUM OF TARGET Q's")
-            #print( torch.sum( target_q))
-            #break
-
-            # Train training_iterations times    
-            for iteration in range(training_iterations):
-                # Forward pass
-                q_values = forward( start_state_tensor_batch ) # To Do: Make this dtype=torch.float32
-                predicted_qs = q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
-
-                #print( "SAMPLE PREDICTED Q VALUES")
-                #print( predicted_qs )
-                #print( "SAMPLE SUM PREDICTED Q's")
-                #print( torch.sum( predicted_qs ))
-                #break
-
-                # Calculate loss between actual Q-value predictions (predicted_qs), and targets (which stay the same
-                # over all episodes)
-                # METRIC 1
-                loss = nn.functional.mse_loss(predicted_qs, target_q )
-
-                # Backward pass --> I think this is where the real learning happens
-                optimizer.zero_grad()   # Zero the gradients
-                loss.backward()         # Back propagate loss gradients through the NN - ie - calculate gradients
-
-                # Update NN weights -- THIS IS LEARNING - GREY MATTER UPDATE
+                optimizer.zero_grad()
+                q_values = policy_net(s_batch)
+                predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
+                
+                loss = nn.functional.mse_loss(predicted_qs, target_q)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
                 
-                # TRAINING METRICS
-                # METRIC 2: average magnitude of all Q-values
-                q_magnitude = torch.mean(torch.abs(q_values[0])).item()
-                # q_magnitude = torch.mean(torch.abs(q_values)).item()
+                # Capture data for metrics
+                last_loss = loss.item()
+                last_q_values = q_values.detach()
+                last_predicted_qs = predicted_qs.detach()
+                last_dones = d_batch.detach()
 
-                # METRIC 3: Calculate avg magnitude of Q vals where state is win or loss
-                terminal_indices = (dones_tensor_batch == 1).nonzero(as_tuple=True)[0]
-                if len(terminal_indices) > 0:
-                    terminal_q_avg = torch.mean(torch.abs(predicted_qs[terminal_indices])).item()
-                else:
-                    terminal_q_avg = 0.0
-                
-                # METRIC 4: Unique States
-                unique_states = len( unique_states_seen )
+            # --- SYNCHRONIZED METRIC LOGGING ---
+            # All these must be appended together so the list lengths match
+            loss_history.append(last_loss)
+            q_magnitude_history.append(torch.mean(torch.abs(last_q_values)).item())
+            unique_states_history.append(len(unique_states_seen))
 
-                # METRIC 5: Win vs. Random Agent
-                if episode % evaluation_frequency == 0:
-                    win_rate_vs_random_pct = evaluate_vs_random(eval_vs_random_game_count)
+            # Metric 3: Terminal Q-Mag (Win/Loss states)
+            # Find terminal states in the last batch
+            terminal_mask = (last_dones == 1)
+            if terminal_mask.any():
+                term_q = torch.mean(torch.abs(last_predicted_qs[terminal_mask])).item()
+            else:
+                # Fallback if no terminal state in batch: use batch average
+                term_q = q_magnitude_history[-1]
+            q_magnitude_history_win_loss.append(term_q)
+
+            # Metric 6 & 7: Neuron Health
+            with torch.no_grad():
+                all_w = torch.cat([p.view(-1) for p in policy_net.parameters()])
+                dead_neuron_cnt_hist.append((torch.abs(all_w) < 0.01).sum().item() / all_w.numel())
+                exploding_neuron_cnt_hist.append((torch.abs(all_w) > 10.0).sum().item() / all_w.numel())
+
+            # Metric 8: Gradients
+            total_grad = 0.0
+            grad_count = 0
+            for p in policy_net.parameters():
+                if p.grad is not None:
+                    total_grad += p.grad.abs().sum().item()
+                    grad_count += p.grad.numel()
+            grad_history.append(total_grad / grad_count if grad_count > 0 else 0)
+
+            # 5. SYNC TARGET NETWORK
+            if episode % config.TARGET_UPDATE_FREQ == 0:
+                target_net.load_state_dict(policy_net.state_dict())
                 
-                # METRIC 6, 7: Dead/Exploding Neurons (using 'output' layer weights as proxy)
-                # To Do: Include all neurons
+            # 6. EVALUATION
+            if episode % 100 == 0:
+                win_rate = evaluate_vs_random(policy_net, num_games=20)
+                win_rate_vs_rand_hist.append(win_rate)
+                print(f"Ep {episode} | Eps: {eps:.2f} | Unique: {len(unique_states_seen)} | WinRate: {win_rate:.2f}")
+
+    return policy_net
+
+"""
+def train_dqn_agent(policy_net, optimizer, config):
+    # 1. SETUP
+    target_net = copy.deepcopy(policy_net) 
+    target_net.eval()
+    
+    # Epsilon setup: start high (random), end low (expert)
+    eps = config.EPS_START 
+    
+    for episode in range(1, config.NUM_EPISODES + 1):
+        # 2. SELF PLAY
+        # Pass current epsilon to the game player
+        # play_self_play_game should return the moves or just add them to replay_buffer
+        new_states_seen = play_self_play_game(policy_net, eps) 
+        
+        # Track unique states
+        for s in new_states_seen:
+            # Convert 2x6x7 board to a string or tuple to make it hashable
+            unique_states_seen.add(s.tobytes()) 
+            
+        # 3. EPSILON DECAY
+        eps = max(config.EPS_END, eps * config.EPS_DECAY)
+
+        # 4. TRAINING LOOP (Perform multiple updates per game)
+        # Often we train 'N' times per episode to speed up learning
+        if replay_buffer.is_ready(config.BATCH_SIZE):
+            policy_net.train()
+            
+            for _ in range(config.TRAIN_N_TIMES_PER_GAME): 
+                # Sample and move to device
+                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
+                
+                s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
+                a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
+                r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
+                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
+                d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
+                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
+
+                # CALCULATE TARGETS
                 with torch.no_grad():
-                    weights = output.weight.data
-                    dead_neuron_cnt = torch.sum(torch.abs(weights) < 0.001).item()
-                    exploding_neuron_cnt = torch.sum(torch.abs(weights) > 10.0).item()
+                    next_q_values = target_net(ns_batch) 
+                    masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
+                    next_q_max = masked_next_q.max(dim=1)[0]
+                    # Bellman: r + gamma * max(Q)
+                    # (Note: In your logic, ensure r is relative to the player whose turn it is)
+                    target_q = r_batch + (config.GAMMA * next_q_max * (1 - d_batch))
 
-                # Calculate average gradient across all parameters
-                total_grad = 0.0
-                total_params = 0
-                for param in all_params:
-                    if param.grad is not None:
-                        total_grad += torch.sum(torch.abs(param.grad)).item()
-                        total_params += param.grad.numel()
-                avg_grad = total_grad / total_params if total_params > 0 else 0.0
+                # GRADIENT STEP
+                optimizer.zero_grad()
+                q_values = policy_net(s_batch)
+                predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
+                
+                loss = nn.functional.mse_loss(predicted_qs, target_q)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
+                optimizer.step()
 
-                # STORE RESULTS
-                loss_history.append(loss.item())            # 1: scalar
-                q_magnitude_history.append(q_magnitude)     # 2: scalar
-                q_magnitude_history_win_loss.append(terminal_q_avg)   #3: scalar
-                unique_states_history.append(unique_states)  # 4: Should increase
-                if episode % evaluation_frequency == 0:
-                    win_rate_vs_rand_hist.append(win_rate_vs_random_pct)     # 5: Should increase from 50% to 100%
-                dead_neuron_cnt_hist.append(dead_neuron_cnt)   # 6: Should stay constant
-                exploding_neuron_cnt_hist.append(exploding_neuron_cnt)  # 7: Should stay constant
-                grad_history.append(avg_grad)                       # 8 Scalar
+            # --- METRICS (Updated for Self-Play) ---
+            loss_history.append(loss.item())
+            q_magnitude_history.append(torch.mean(torch.abs(q_values)).item())
+            unique_states_history.append(len(unique_states_seen))
+
+            # 5. SYNC TARGET NETWORK (e.g., every 50 episodes)
+            if episode % config.TARGET_UPDATE_FREQ == 0:
+                target_net.load_state_dict(policy_net.state_dict())
+                
+            # 6. EVALUATION
+            if episode % 20 == 0:
+                win_rate = evaluate_vs_random(policy_net, num_games=20)
+                win_rate_vs_rand_hist.append(win_rate)
+                print(f"Ep {episode} | Eps: {eps:.2f} | Unique States: {len(unique_states_seen)} | Win Rate: {win_rate:.2f}")
+
+    return policy_net
 """
                 
 
@@ -609,8 +711,8 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 # *****************************************************************
 # Train, show results
 # *****************************************************************
-#train_dqn_agent()                   # <--- REAL SELF PLAY
-train_on_synthetic_replay_buffer(policy_net, optimizer)  # <--- SYNTHETIC EXPERIENCE
+train_dqn_agent(policy_net, optimizer, config)                                           # <--- REAL SELF PLAY
+#train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
 
 plot_training_metrics(
     loss_history,
@@ -670,30 +772,3 @@ with torch.no_grad():
 #    q_values = policy_net(state_tensor)
 print( "Q Values on REVERSED test state: ", q_values )
 
-"""
-initial_board = examples[example_test_case]['board']
-players = examples[example_test_case]['players']
-env.set_state( initial_board, players[0] )
-
-print( "Initial board ")
-print( initial_board)
-print( "Initial Player: ", players[0] )
-print( "Initial Board as stored in environment" )
-print( env.get_state() )
-print( "Test Inference ")
-q_values = forward(env.get_state())
-print( "Q Values on initial board state: ", q_values )
-
-print( "Switched player")
-env.set_state( initial_board, players[1] )
-
-print( "Flipped Board")
-initial_board = -1 * initial_board
-print( initial_board)
-env.set_state( initial_board, players[0] )
-print( "Flipped Board as stored in environment" )
-print( env.get_state() )
-print( "Test Inference ")
-q_values = forward(env.get_state())
-print( "Q Values on flipped state: ", q_values )
-"""
