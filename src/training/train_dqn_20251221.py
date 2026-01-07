@@ -63,7 +63,7 @@ evaluation_frequency        = 10    # Evaluate every 10 episodes
 # *****************************************************************
 config = Config()
 env = ConnectFourEnvironment(config)
-replay_buffer = DQNReplayBuffer(capacity=10000)
+replay_buffer = DQNReplayBuffer(capacity=20000)
 
 #replay_buffer.add( [1,2,3], 0, 0, [2,3,4], False)
 #replay_buffer.add( [2,3,4], 0, 1, [3,4,5], False)
@@ -369,6 +369,7 @@ win_rate_vs_rand_hist = []  # 5: Should increase from 50% to 100%
 dead_neuron_cnt_hist = []   # 6: Should stay constant
 exploding_neuron_cnt_hist = []  # 7: Should stay constant
 grad_history = []           # 8: Should stay constant, or decrease
+terminal_pct_history = []   # Initialize new history list
 unique_states_seen = set()
 
 def train_dqn_agent(policy_net, optimizer, config):
@@ -391,6 +392,7 @@ def train_dqn_agent(policy_net, optimizer, config):
         # 4. TRAINING LOOP
         if replay_buffer.is_ready(config.BATCH_SIZE):
             policy_net.train()
+            batch_terminal_counts = []
             
             # We track the 'last' values of the loop to append to history
             last_loss = 0
@@ -399,8 +401,13 @@ def train_dqn_agent(policy_net, optimizer, config):
             last_dones = None
 
             for _ in range(config.TRAIN_N_TIMES_PER_GAME): 
-                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
-                
+                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
+                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(
+                    config.BATCH_SIZE, 
+                    terminal_ratio=0.25 # Our target ratio
+                )
+
+
                 s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
                 a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
                 r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
@@ -428,6 +435,9 @@ def train_dqn_agent(policy_net, optimizer, config):
                 last_q_values = q_values.detach()
                 last_predicted_qs = predicted_qs.detach()
                 last_dones = d_batch.detach()
+
+                actual_pct = np.mean(dones) 
+                batch_terminal_counts.append(actual_pct)
 
             # --- SYNCHRONIZED METRIC LOGGING ---
             # All these must be appended together so the list lengths match
@@ -459,6 +469,9 @@ def train_dqn_agent(policy_net, optimizer, config):
                     total_grad += p.grad.abs().sum().item()
                     grad_count += p.grad.numel()
             grad_history.append(total_grad / grad_count if grad_count > 0 else 0)
+
+            # Metric 9: Terminal % of Batch
+            terminal_pct_history.append(np.mean(batch_terminal_counts))
 
             # 5. SYNC TARGET NETWORK
             if episode % config.TARGET_UPDATE_FREQ == 0:
@@ -630,6 +643,10 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
                 grad_count += p.grad.numel()
         grad_history.append(total_grad / grad_count if grad_count > 0 else 0)
 
+        #9. Batch terminal position percentage
+        actual_pct = np.mean(dones)
+        terminal_pct_history.append(actual_pct)
+
         # 5. SYNC TARGET NETWORK
         if episode % 100 == 0:
             target_net.load_state_dict(policy_net.state_dict())
@@ -643,7 +660,7 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
 # *****************************************************************
 def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist, 
                           win_rate_hist, dead_hist, exploding_hist, grad_hist, 
-                          eval_freq=10):
+                          terminal_pct_hist, eval_freq=10):
     """
     Simplified plotting function for DQN training.
     6 subplots consolidating 8 metrics.
@@ -681,13 +698,21 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.set_ylabel('Count')
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 4: Win Rate vs Random ---
+    # --- Plot 4: Win Rate AND Terminal % ---
     ax = axes[1, 0]
-    ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', linewidth=2)
-    ax.axhline(y=0.5, color='red', linestyle='--', label='Random (50%)')
+    # Plot the batch terminal % as a light blue area/line
+    ax.plot(episodes, terminal_pct_hist, color='cyan', alpha=0.3, label='Batch Terminal %')
+    if len(terminal_pct_hist) > 10:
+        smoothed_term = np.convolve(terminal_pct_hist, np.ones(20)/20, mode='valid')
+        ax.plot(episodes[19:], smoothed_term, color='teal', alpha=0.6, label='Avg Terminal %')
+    
+    # Plot the actual Win Rate (Markers)
+    ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', linewidth=2, label='Win Rate vs Random')
+    
+    ax.axhline(y=0.5, color='red', linestyle='--', label='Random (0.5)')
     ax.set_ylim(0, 1.1)
-    ax.set_title('Win Rate vs Random Agent')
-    ax.legend(loc='lower right')
+    ax.set_title('Win Rate & Terminal Signal')
+    ax.legend(loc='lower right', fontsize='small')
     ax.grid(True, alpha=0.3)
 
     # --- Plot 5: NN Health (Combined Dead/Exploding) ---
@@ -723,6 +748,7 @@ plot_training_metrics(
     dead_neuron_cnt_hist,
     exploding_neuron_cnt_hist,
     grad_history,
+    terminal_pct_history,
     eval_freq=10)
 
 

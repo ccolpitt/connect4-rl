@@ -41,7 +41,7 @@ from typing import Tuple, List
 
 Transition = namedtuple( 'Transition', ('state', 'action', 'reward', 'next_state', 'done', 'next_mask'))
 
-class DQNReplayBuffer:
+class DQNReplayBuffer:  
     """
     Replay buffer for storing and sampling experiences in DQN.
     
@@ -70,13 +70,15 @@ class DQNReplayBuffer:
             capacity: Maximum number of experiences to store.
                      When full, oldest experiences are automatically removed.
                      Typical values: 10,000 to 1,000,000
-        
         Example:
             buffer = DQNReplayBuffer(capacity=50000)
         """
         self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
-    
+        # Separate storage for terminal states to ensure balanced sampling
+        self.terminal_buffer = deque(maxlen=capacity // 2)
+
+        
     def add(self, 
             state: np.ndarray, 
             action: int, 
@@ -89,118 +91,68 @@ class DQNReplayBuffer:
         
         This method stores a single transition (s, a, r, s', done).
         If buffer is full, the oldest experience is automatically removed.
-        
-        Args:
-            state: Current state before action, shape (3, 6, 7)
-            action: Action taken (column index 0-6)
-            reward: Reward received (1.0 for win, -1.0 for loss, 0.0 for draw, None for continuing)
-            next_state: Resulting state after action, shape (3, 6, 7)
-            done: Whether the episode ended (True if game over)
-        
-        Example:
-            # During gameplay
-            state = env.get_state()
-            action = agent.select_action(state, legal_moves)
-            next_state, reward, done = env.play_move(action)
-            buffer.add(state, action, reward, next_state, done)
-        
-        Note:
-            - States are stored as-is (not copied), so make sure to pass copies if needed
-            - Buffer automatically removes oldest when capacity is reached
         """
-        # Named tuple - recommended default
-        #experience = (state, action, reward, next_state, done)
-        # Version with a dictionary -- not memory efficient, and harder to assemble into batches
-        #experience = {"state":state,"action":action,"reward":reward,"next_state":next_state,"done":done}
-        #self.buffer.append(experience)
-        self.buffer.append( Transition( state, action, reward, next_state, done, next_mask ) )
+        experience = Transition(state, action, reward, next_state, done, next_mask)
+        self.buffer.append( experience )
+        if done:
+            self.terminal_buffer.append(experience)
     
     def update_penalty( self, index, new_reward, is_done ):
-        self.buffer[index] = self.buffer[index]._replace(reward = new_reward, done=is_done)
+        #self.buffer[index] = self.buffer[index]._replace(reward = new_reward, done=is_done)
+        if abs(index) > len(self.buffer):
+            return
+
+        # 1. Update the main buffer (inplace replacement)
+        old_transition = self.buffer[index]
+        new_transition = old_transition._replace(reward=float(new_reward), done=float(is_done))
+        self.buffer[index] = new_transition
+        
+        # 2. Add to terminal buffer for balanced sampling
+        if is_done:
+            self.terminal_buffer.append(new_transition)
 
     def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Sample a batch of experiences for training.
-        
-        This method samples experiences from the buffer, either randomly or from
-        specific indices (useful for auditing).
-        
-        Args:
-            batch_size: Number of experiences to sample (typically 32, 64, or 128)
-            indices: Optional list of specific indices to sample. If None, samples randomly.
-                    Use negative indices to count from end (e.g., [-1] for most recent)
-        
-        Returns:
-            Tuple of numpy arrays:
-            - states: (batch_size, 3, 6, 7) - batch of states
-            - actions: (batch_size,) - batch of actions
-            - rewards: (batch_size,) - batch of rewards
-            - next_states: (batch_size, 3, 6, 7) - batch of next states
-            - dones: (batch_size,) - batch of done flags
-        
-        Raises:
-            ValueError: If batch_size > len(buffer) or invalid indices
-        
-        Example:
-            # Random sampling (normal training)
-            states, actions, rewards, next_states, dones = buffer.sample(32)
-            
-            # Sample most recent experience (auditing)
-            states, actions, rewards, next_states, dones = buffer.sample(1, indices=[-1])
-            
-            # Sample specific experiences
-            states, actions, rewards, next_states, dones = buffer.sample(3, indices=[0, 5, 10])
-        
-        Note:
-            - Random sampling is with replacement
-            - Specific indices sampling is without replacement
-            - Returns numpy arrays ready for PyTorch/TensorFlow
+        Augmented sample function.
+        If indices are provided: returns those specific transitions.
+        If indices are None: returns a balanced batch with terminal_ratio.
         """
         if batch_size > len(self.buffer):
-            raise ValueError(
-                f"Cannot sample {batch_size} experiences from buffer with only {len(self.buffer)} experiences. "
-                f"Wait until buffer has at least {batch_size} experiences."
-            )
-        
+            raise ValueError(f"Not enough samples in buffer ({len(self.buffer)})")
+
+        # Path A: Sample specific indices (Auditing/Debugging)
         if indices is not None:
-            # Sample specific indices
             if len(indices) != batch_size:
-                raise ValueError(f"Number of indices ({len(indices)}) must match batch_size ({batch_size})")
+                raise ValueError("Indices count must match batch_size")
             
-            # Convert negative indices to positive
+            # Support negative indexing (like -1 for most recent)
             buffer_len = len(self.buffer)
-            positive_indices = [(i if i >= 0 else buffer_len + i) for i in indices]
+            batch = [self.buffer[i if i >= 0 else buffer_len + i] for i in indices]
             
-            # Validate indices
-            for i in positive_indices:
-                if i < 0 or i >= buffer_len:
-                    raise ValueError(f"Index {i} out of range for buffer of size {buffer_len}")
-            
-            # Get experiences at specific indices
-            batch = [self.buffer[i] for i in positive_indices]
+        # Path B: Balanced Sampling (Training)
         else:
-            # Randomly sample batch_size experiences
-            batch = random.sample(self.buffer, batch_size)
-        
-        # Unzip the batch into separate arrays
-        #print( "We calculated the batch")
+            n_terminals = int(batch_size * terminal_ratio)
+            
+            # If we are early in training and don't have enough terminals, fall back to random
+            if len(self.terminal_buffer) < n_terminals:
+                batch = random.sample(self.buffer, batch_size)
+            else:
+                terminals = random.sample(self.terminal_buffer, n_terminals)
+                non_terminals = random.sample(self.buffer, batch_size - n_terminals)
+                batch = terminals + non_terminals
+                random.shuffle(batch)
+
+        # Path C: Consistent Unzipping and Conversion
         states, actions, rewards, next_states, dones, next_masks = zip(*batch)
-        #print( "We broke out parts of the batch")
-        #print( "States in replay buffer: ")
-        #print( states )
-        #print( "Full Batch")
-        #print( batch )
 
-
-        # Convert to numpy arrays for efficient computation
-        states = np.array(states, dtype=np.float32)           # (batch_size, 3, 6, 7)
-        actions = np.array(actions, dtype=np.int64)           # (batch_size,)
-        rewards = np.array(rewards, dtype=np.float32)         # (batch_size,)
-        next_states = np.array(next_states, dtype=np.float32) # (batch_size, 3, 6, 7)
-        dones = np.array(dones, dtype=np.float32)             # (batch_size,) - 1.0 if done, 0.0 if not
-        next_masks = np.array( next_masks, dtype=np.int16)    # (batch_size,)
-
-        return states, actions, rewards, next_states, dones, next_masks
+        return (
+            np.array(states, dtype=np.float32),
+            np.array(actions, dtype=np.int64),
+            np.array(rewards, dtype=np.float32),
+            np.array(next_states, dtype=np.float32),
+            np.array(dones, dtype=np.float32),
+            np.array(next_masks, dtype=np.int16)
+        )
     
     def __len__(self) -> int:
         """

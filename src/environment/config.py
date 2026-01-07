@@ -40,10 +40,10 @@ class Config:
     # Training Constants
     NUM_EPISODES = 5000
     EPS_START   = 0.5
-    EPS_END     = 0.05
-    EPS_DECAY   = 0.999
+    EPS_END     = 0.1
+    EPS_DECAY   = 0.9999
     BATCH_SIZE  = 128
-    TRAIN_N_TIMES_PER_GAME  = 1
+    TRAIN_N_TIMES_PER_GAME  = 4
     GAMMA       = 0.99
     TARGET_UPDATE_FREQ      = 100
     
