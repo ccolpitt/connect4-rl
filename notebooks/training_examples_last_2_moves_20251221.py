@@ -135,42 +135,6 @@ def get_training_examples():
         'description': 'fail to block, then win'
     })
 
-    board = np.array(
-        [[0, 0,  0,  0,  0, 0, 0],
-         [0, 0,  0,  0,  0, 0, 0],
-         [0, 0,  0,  0,  0, 0, 0],
-         [0, 0,  0,  0,  0, 0, 0],
-         [0, 0, -1, -1,  0, 0, 0],
-         [0, 1,  1,  1, -1, 0, 0]])
-    last_moves = [0]
-    rewards = [0.5]
-    players = np.array([-1])
-    examples.append({
-        'board': board.copy(),
-        'last_moves': last_moves,
-        'rewards': rewards,
-        'players': players,
-        'description': 'succeed in blocking'
-    })
-
-    board = np.array(
-        [[0, 0,  0,  0,  0, 0, 0],
-         [0, 0,  0,  0,  0, 0, 0],
-         [0, 0,  0,  0,  0, 0, 0],
-         [0, 1,  0,  0,  0, 0, 0],
-         [0, 1, -1,  0,  0, 0, 0],
-         [0, 1, -1,  0,  0, 0, 0]])
-    last_moves = [1]
-    rewards = [0.5]
-    players = np.array([-1])
-    examples.append({
-        'board': board.copy(),
-        'last_moves': last_moves,
-        'rewards': rewards,
-        'players': players,
-        'description': 'succeed in blocking'
-    })
-
     # ****** Training Example 4.1 ******
     board = np.array(
         [[0, 0, 0,  0,  0,  0, 0],
@@ -209,25 +173,6 @@ def get_training_examples():
         'description': 'next case'
     })
 
-        # ****** Training Example 4.2 ******
-    board = np.array(
-        [[0, 0, 0, 0,  0,  0, 0],
-         [0, 0, 0, 0,  0,  0, 0],
-         [0, 0, 0, 0,  0,  0, 0],
-         [0, 0, 0, 0,  0,  0, 0],
-         [0, 0, 0, 0, -1, -1, 0],
-         [0, 0, 0, 1,  1,  1, -1]])
-    last_moves = [2]
-    rewards = [0.5]
-    players = np.array([-1])
-    examples.append({
-        'board': board.copy(),
-        'last_moves': last_moves,
-        'rewards': rewards,
-        'players': players,
-        'description': 'successfull next block'
-    })
-
     # ****** Training Example 5 ******
     board = np.array(
         [[0, 0, 0,  0,  0, 0, 0],
@@ -239,25 +184,6 @@ def get_training_examples():
     last_moves = [3,0]
     rewards = [-1.0, 1.0]
     players = np.array([-1, 1])
-    examples.append({
-        'board': board.copy(),
-        'last_moves': last_moves,
-        'rewards': rewards,
-        'players': players,
-        'description': 'next case'
-    })
-
-    # ****** Training Example 5 ******
-    board = np.array(
-        [[0, 0, 0,  0,  0, 0, 0],
-         [0, 0, 0,  0,  0, 0, 0],
-         [0, 0, 0,  0,  0, 0, 0],
-         [0, 0, 0,  0,  0, 0, 0],
-         [0, 0, 0, -1,  0, 0, 0],
-         [0, 1, 1,  1, -1, 0, 0]])
-    last_moves = [0]
-    rewards = [0.5]
-    players = np.array([-1])
     examples.append({
         'board': board.copy(),
         'last_moves': last_moves,
