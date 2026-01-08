@@ -230,6 +230,25 @@ def get_training_examples():
         'description': 'next case'
     })
 
+    # ****** Training Example 5 ******
+    board = np.array(
+        [[0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  1,  0, 0, 0],
+         [0, 0, 1, -1,  0, 0, 0],
+         [0, 0,-1, -1,  0, 0, 0],
+         [1,-1,-1,  1,  1, 0, 0]])
+    last_moves = [4,1]
+    rewards = [-1.0, 1.0]
+    players = np.array([-1, 1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'next case'
+    })
+
     return examples
 
 # ####################################################################################3
@@ -340,6 +359,7 @@ def generate_artificial_replay_buffer_for_training():
     return replay_buffer
 """
 
+"""
 replay_buffer = generate_artificial_replay_buffer_for_training()
 print( "Length of synthetic replay buffer: ", len( replay_buffer) )
 print()
@@ -362,4 +382,5 @@ for entry in replay_buffer.buffer:
     print( "Next move mask:" )
     print( entry.next_mask )
     idx += 1
+"""
 # ####################################################################################

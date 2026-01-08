@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Constants
 # *****************************************************************
-num_episodes                = 1000   # Number of games to train on
+#num_episodes                = 1000   # Number of games to train on
 batch_size                  = 16
 learning_rate               = 0.00001
 training_iterations         = 1     # Training per game
@@ -513,16 +513,22 @@ def train_dqn_agent(policy_net, optimizer, config):
     return policy_net
                 
 
-# Synthetic training with a contrived replay buffer - prove that the network will learn
-# win and loss
+# *****************************************************************
+# Synthetic Training Loop, Function: 
+# *****************************************************************
+# Use this to prove that the network will learn Q estimates for win and loss
+# example state / action pairs
+num_episodes = 200
+batch_size = 16
+target_sync_frequency = 1   # If 1, we sync every episode.  Changes to supervised learning
 
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
 import copy
+
 def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
     # 1. SETUP: Get the full synthetic buffer
     # Let's assume this buffer has ~30-50 high-quality examples
-    replay_buffer = generate_artificial_replay_buffer_for_training()
-    batch_size = 16 
+    replay_buffer = generate_artificial_replay_buffer_for_training()    
     
     # Initialize Target Net
     target_net = copy.deepcopy(policy_net)
@@ -533,6 +539,24 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
         # This replicates the randomness of the real training loop
         states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
         
+        # Test that sampling is working - print out
+        """
+        print( "x"*10, "Episode ", episode, "x"*10)
+        print( "Sampled States")
+        print( states )
+        print( "/n Sampled Actions")
+        print( actions )
+        print( "/n Sampled Rewards")
+        print( rewards )
+        print( "/n Sampled Next States")
+        print( next_states )
+        print( "/n Sampled Dones")
+        print( dones )
+        print( "/n Next Masks")
+        print( next_masks )
+        """
+
+        # Convert to tensors
         s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
         a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
         r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
@@ -560,6 +584,11 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
         # Clip Gradients to prevent the "bad Q-values" explosion
         torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
         optimizer.step()
+
+        # Periodically sync target newtork with policy network
+        if (episode % target_sync_frequency == 0 and len(q_magnitude_history) > 0):
+            target_net.load_state_dict(policy_net.state_dict())
+            print(f"Ep {episode} | Loss: {loss.item():.4f} | Q-Mag: {q_magnitude_history[-1]:.2f} | Grad: {grad_history[-1]:.6f}")
 
         # --- POPULATE METRICS ---
         # 1. Loss
@@ -604,12 +633,6 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
         #9. Batch terminal position percentage
         actual_pct = np.mean(dones)
         terminal_pct_history.append(actual_pct)
-
-        # 5. SYNC TARGET NETWORK
-        if episode % 100 == 0:
-            target_net.load_state_dict(policy_net.state_dict())
-            print(f"Ep {episode} | Loss: {loss.item():.4f} | Q-Mag: {q_magnitude_history[-1]:.2f} | Grad: {grad_history[-1]:.6f}")
-
     return policy_net
 
 
@@ -722,7 +745,9 @@ plot_training_metrics(
 # Test the trained policy 
 # *****************************************************************
 # Test 1: Test on cases in the replay buffer
-test_sample = [0, 1]         # Choose which item in the replay buffer to use
+
+
+test_sample = [0]         # Choose which item in the replay buffer to use
 test_batch_size = len(test_sample)     # Choose a single item from the replay buffer to test
 
 #examples = get_training_examples()
@@ -747,16 +772,4 @@ with torch.no_grad():
 #    q_values = policy_net(state_tensor)
 print( "Q Values on synthetic test state: " )
 print( q_values )
-
-"""
-print( "Sample flipped state:")
-state = state[:, [1, 0], :, :]
-print( state )
-policy_net.eval() # CRITICAL for test consistency!
-with torch.no_grad():
-    q_values = policy_net(state) # The class handles the rest
-#state_tensor = torch.FloatTensor(state).to('cpu')
-#with torch.no_grad():
-#    q_values = policy_net(state_tensor)
-print( "Q Values on REVERSED test state: ", q_values )
 """
