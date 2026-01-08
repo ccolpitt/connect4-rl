@@ -248,10 +248,11 @@ def generate_artificial_replay_buffer_for_training():
             state = env.get_state()
             next_state, reward, done = env.play_move(action)
             
-            if not done:
-                next_mask = get_action_mask(env.get_legal_moves())
-            else:
-                next_mask = np.zeros(7, dtype=np.float32)
+            next_mask = get_action_mask(env.get_legal_moves())
+            #if not done:
+            #    next_mask = get_action_mask(env.get_legal_moves())
+            #else:
+            #    next_mask = np.zeros(7, dtype=np.float32)
 
             # Use symmetric add: adds 2 entries (Original + Mirrored)
             replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
@@ -299,68 +300,26 @@ def generate_artificial_replay_buffer_for_training():
     return replay_buffer
 """
 
-#replay_buffer = generate_artificial_replay_buffer_for_training()
-#print( "Length of synthetic replay buffer: ", len( replay_buffer) )
+replay_buffer = generate_artificial_replay_buffer_for_training()
+print( "Length of synthetic replay buffer: ", len( replay_buffer) )
+print()
 
-"""
 idx = 1
 for entry in replay_buffer.buffer:
     print( "#"*20)
     print( "EXAMPLE: ", idx)
     print( "#"*20)
-    #print( "State:" )
-    #print( entry.state )
-    #print( "Action:" )
-    #print( entry.action )
+    print( "State:" )
+    print( entry.state )
+    print( "Action:" )
+    print( entry.action )
     print( "Reward:" )
     print( entry.reward )
-    #print( "Next State:" )
-    #print( entry.next_state )
+    print( "Next State:" )
+    print( entry.next_state )
     print( "Is Done:" )
     print( entry.done )
-    #print( "Next move mask:" )
-    #print( entry.next_mask )
+    print( "Next move mask:" )
+    print( entry.next_mask )
     idx += 1
-"""
-# ####################################################################################3
-
-            
-
-
-
-
-# Baseline self-play function - Pulled from train_dqn_20251221
-def play_self_play_game():
-    env.reset()
-    done = False
-    moves = 0
-    eps = config.EPS
-
-    # loop through moves
-    while not done and moves < 42:
-        state = env.get_state()     # This needs to return a tensor
-        unique_states_seen.add(hash_state(state)) # TRACKING UNIQUE STATES
-        legal_moves = env.get_legal_moves()
-        
-        # Eps greedy
-        state_tensor = torch.tensor(state, dtype=torch.float32)
-        action = select_action(state_tensor, legal_moves, eps)
-        # Make the move
-        next_state, reward, done = env.play_move( action )
-        # Get mask for the NEXT player ---
-        if not done:
-            next_legal_moves = env.get_legal_moves()
-            next_mask = get_action_mask(next_legal_moves)
-        else:
-            next_mask = np.zeros(7, dtype=np.float32)
-
-        # Add to replay buffer
-        replay_buffer.add( state, action, reward, next_state, done, next_mask)
-        moves += 1
-    
-    # Update the reward of the second to last move, if not a draw
-    if( reward != 0 ):
-        replay_buffer.update_penalty(-2, -1, True )
-        #print( "SECOND TO LAST")
-        #print( replay_buffer.buffer[-2] )
-
+# ####################################################################################
