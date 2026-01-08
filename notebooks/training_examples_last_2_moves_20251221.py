@@ -192,6 +192,44 @@ def get_training_examples():
         'description': 'next case'
     })
 
+    # ****** Training Example 5 ******
+    board = np.array(
+        [[0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 1, 0,  0,  0, 0, 0],
+         [0, 1, 0, -1,  0, 0, 0],
+         [0, 1, 0, -1,  0, 0, 0]])
+    last_moves = [3,1]
+    rewards = [-1.0, 1.0]
+    players = np.array([-1, 1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'next case'
+    })
+
+    # ****** Training Example 5 ******
+    board = np.array(
+        [[0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [1, 0, 0,  0,  0, 0, 0],
+         [1, 0, 0,  0,  0, 0, 0],
+         [1,-1, 0, -1,  0, 0, 0]])
+    last_moves = [2,0]
+    rewards = [-1.0, 1.0]
+    players = np.array([-1, 1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'next case'
+    })
+
     return examples
 
 # ####################################################################################3
@@ -259,6 +297,8 @@ def generate_artificial_replay_buffer_for_training():
             
             # If this move ended the game, the opponent's previous move (2 entries ago)
             # must be updated to a loss. Since we added 2 entries, we hit -3 and -4.
+            # NOTE THAT WE ARE USING THE REWARDS CALCULATED FROM THE ENVIRONMENT, SO 
+            # WE DO NEED TO DO THIS!
             if reward != 0:
                 replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
                 replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
