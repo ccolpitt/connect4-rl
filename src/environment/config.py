@@ -35,19 +35,20 @@ class Config:
     DRAW_VALUE = 0
 
     # Neural Net Constants
-    DROPOUT_RATE = 0.0
+    DROPOUT_RATE = 0.00
 
     # Training Constants
-    NUM_EPISODES = 5000
+    NUM_EPISODES = 500
     EPS_START   = 0.5
-    EPS_END     = 0.1
+    EPS_END     = 0.2
     EPS_DECAY   = 0.9999
-    BATCH_SIZE  = 128
     TRAIN_N_TIMES_PER_GAME  = 4
     GAMMA       = 0.99
     TARGET_UPDATE_FREQ      = 100
-    
 
+    # Replay Buffer Sampling Constants
+    TERMINAL_RATE = 0.3
+    BATCH_SIZE  = 128
 
     
     # Device configuration

@@ -16,6 +16,15 @@ same thing as the q-value targets.
 
 import numpy as np
 
+def str_to_board(s):
+    """Helper to turn a string layout into a 6x7 numpy array."""
+    # Removes whitespace and converts chars to ints
+    rows = s.strip().split('\n')
+    return np.array([[int(c.replace('.', '0').replace('X', '1').replace('O', '-1')) 
+                     for c in row.split()] for row in rows])
+
+
+
 
 def get_training_examples():
     """
@@ -49,21 +58,12 @@ def get_training_examples():
         'description': 'Example 1: Player 1 wins diag / at column 5'
     })
 
-    # Flipped version -- with relative state representation - this doesn't add information
-    #examples.append({
-    #    'board': -1 * board,
-    #    'last_moves': last_moves,
-    #    'rewards': rewards,
-    #    'players': -1 * players,
-    #    'description': 'Example 2: Player -1 wins diag / at column 5'
-    #})
-
     # ****** Training Example 1.1 ******
     board = np.array(
         [[ 0,  0,  0,  0,  0,  1, 0],
          [ 0,  0,  0,  0,  0,  1, 0],
          [ 0,  0,  0,  0,  0,  1, 0],
-         [ 1,  0,  0,  0,  0, -1, 0],
+         [ 1,  0,  0,  0,  0, -1, 0], # same as before, but shifted left
          [-1,  1, -1,  1, -1, -1, 0],
          [ 1, -1,  1, -1, -1,  1, 0]])
     last_moves = [0, 4]
@@ -76,14 +76,7 @@ def get_training_examples():
         'players': players,
         'description': 'Example 1: Player 1 wins diag / at column 5'
     })
-    # Flipped version
-    #examples.append({
-    #    'board': -1 * board,
-    #    'last_moves': last_moves,
-    #    'rewards': rewards,
-    #    'players': -1 * players,
-    #    'description': 'Example 2: Player -1 wins diag / at column 5'
-    #})
+
     
     # ****** Training Example 3 ******
     board = np.array(
@@ -101,16 +94,9 @@ def get_training_examples():
         'last_moves': last_moves,
         'rewards': rewards,
         'players': players,
-        'description': 'Example 1: Player 1 wins diag / at column 5'
+        'description': 'Fail to block, then win'
     })
-    # Flipped version
-    #examples.append({
-    #    'board': -1 * board,
-    #    'last_moves': last_moves,
-    #    'rewards': rewards,
-    #    'players': -1 * players,
-    #    'description': 'Example 2: Player -1 wins diag / at column 5'
-    #})
+
 
     # ****** Training Example 3 ******
     board = np.array(
@@ -118,7 +104,7 @@ def get_training_examples():
          [0, 0,  0,  0,  0, 0, 0],
          [0, 0,  0,  0,  0, 0, 0],
          [0, 0,  0,  0,  0, 0, 0],
-         [0, 0, -1, -1,  0, 0, 0],
+         [0, 0, -1, -1,  0, 0, 0],  # Real attempt to block, then win
          [0, 0,  1,  1,  1, 0, 0]])
     last_moves = [5, 1]
     rewards = [-1.0, 1.0]
@@ -128,7 +114,7 @@ def get_training_examples():
         'last_moves': last_moves,
         'rewards': rewards,
         'players': players,
-        'description': 'next case'
+        'description': 'Attempt at block, then win'
     })
 
     board = np.array(
@@ -146,7 +132,43 @@ def get_training_examples():
         'last_moves': last_moves,
         'rewards': rewards,
         'players': players,
-        'description': 'next case'
+        'description': 'fail to block, then win'
+    })
+
+    board = np.array(
+        [[0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0, -1, -1,  0, 0, 0],
+         [0, 1,  1,  1, -1, 0, 0]])
+    last_moves = [0]
+    rewards = [0.5]
+    players = np.array([-1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'succeed in blocking'
+    })
+
+    board = np.array(
+        [[0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 0,  0,  0,  0, 0, 0],
+         [0, 1,  0,  0,  0, 0, 0],
+         [0, 1, -1,  0,  0, 0, 0],
+         [0, 1, -1,  0,  0, 0, 0]])
+    last_moves = [1]
+    rewards = [0.5]
+    players = np.array([-1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'succeed in blocking'
     })
 
     # ****** Training Example 4.1 ******
@@ -187,6 +209,25 @@ def get_training_examples():
         'description': 'next case'
     })
 
+        # ****** Training Example 4.2 ******
+    board = np.array(
+        [[0, 0, 0, 0,  0,  0, 0],
+         [0, 0, 0, 0,  0,  0, 0],
+         [0, 0, 0, 0,  0,  0, 0],
+         [0, 0, 0, 0,  0,  0, 0],
+         [0, 0, 0, 0, -1, -1, 0],
+         [0, 0, 0, 1,  1,  1, -1]])
+    last_moves = [2]
+    rewards = [0.5]
+    players = np.array([-1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'successfull next block'
+    })
+
     # ****** Training Example 5 ******
     board = np.array(
         [[0, 0, 0,  0,  0, 0, 0],
@@ -198,6 +239,25 @@ def get_training_examples():
     last_moves = [3,0]
     rewards = [-1.0, 1.0]
     players = np.array([-1, 1])
+    examples.append({
+        'board': board.copy(),
+        'last_moves': last_moves,
+        'rewards': rewards,
+        'players': players,
+        'description': 'next case'
+    })
+
+    # ****** Training Example 5 ******
+    board = np.array(
+        [[0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0,  0,  0, 0, 0],
+         [0, 0, 0, -1,  0, 0, 0],
+         [0, 1, 1,  1, -1, 0, 0]])
+    last_moves = [0]
+    rewards = [0.5]
+    players = np.array([-1])
     examples.append({
         'board': board.copy(),
         'last_moves': last_moves,
@@ -250,6 +310,38 @@ def get_action_mask(legal_moves):
 def generate_artificial_replay_buffer_for_training():
     config = Config()
     env = ConnectFourEnvironment(config)
+    # Larger capacity to handle symmetry
+    replay_buffer = DQNReplayBuffer(capacity=1000) 
+    examples = get_training_examples()
+
+    for example in examples:
+        env.reset()
+        env.set_state(example['board'], example['players'][0])
+        
+        for action in example['last_moves']:
+            state = env.get_state()
+            next_state, reward, done = env.play_move(action)
+            
+            if not done:
+                next_mask = get_action_mask(env.get_legal_moves())
+            else:
+                next_mask = np.zeros(7, dtype=np.float32)
+
+            # Use symmetric add: adds 2 entries (Original + Mirrored)
+            replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
+            
+            # If this move ended the game, the opponent's previous move (2 entries ago)
+            # must be updated to a loss. Since we added 2 entries, we hit -3 and -4.
+            if reward != 0:
+                replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+                replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
+                
+    return replay_buffer
+
+"""
+def generate_artificial_replay_buffer_for_training():
+    config = Config()
+    env = ConnectFourEnvironment(config)
     replay_buffer = DQNReplayBuffer(capacity=10000)
     examples = get_training_examples()
     env.reset()
@@ -279,8 +371,10 @@ def generate_artificial_replay_buffer_for_training():
             if( reward != 0 ):
                 replay_buffer.update_penalty(-2, -1, True )
     return replay_buffer
+"""
 
-replay_buffer = generate_artificial_replay_buffer_for_training()
+#replay_buffer = generate_artificial_replay_buffer_for_training()
+#print( "Length of synthetic replay buffer: ", len( replay_buffer) )
 
 """
 idx = 1

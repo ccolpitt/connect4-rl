@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Constants
 # *****************************************************************
-num_episodes                = 200   # Number of games to train on
+num_episodes                = 1000   # Number of games to train on
 batch_size                  = 16
 learning_rate               = 0.00001
 training_iterations         = 1     # Training per game
@@ -65,8 +65,8 @@ config = Config()
 env = ConnectFourEnvironment(config)
 replay_buffer = DQNReplayBuffer(capacity=20000)
 
-#replay_buffer.add( [1,2,3], 0, 0, [2,3,4], False)
-#replay_buffer.add( [2,3,4], 0, 1, [3,4,5], False)
+#replay_buffer.add( [1,2,3], 0, 0, [2,3,4], False, [1,2,3]) # Test replay buffer - comment out when training
+#replay_buffer.add( [2,3,4], 0, 1, [3,4,5], False, [1,2,3]) # Test replay buffer
 
 """
 print( replay_buffer )
@@ -75,8 +75,11 @@ print( replay_buffer.sample(1,[-1]))
 print( "Second Most Recent Entry in Buffer:")
 print( replay_buffer.sample(1,[-2]))
 # Adjust reward of second to last entry
-# PLACEHOLDER
+replay_buffer.update_penalty(-2,-1,1)
+print( "Replay buffer after updating 2nd to last entry")
+print( replay_buffer.sample(1,[-2]))
 """
+
 
 # *****************************************************************
 # Create Network
@@ -85,53 +88,74 @@ import torch
 import torch.nn as nn
 import copy
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
 class Connect4Net(nn.Module):
     def __init__(self, device, dropout_rate=0.2):
         super(Connect4Net, self).__init__()
         self.device = device
         
-        # Define layers
-        self.conv1 = nn.Conv2d(2, 32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
+        # Layer 1: Initial feature extraction
+        self.conv1 = nn.Conv2d(2, 64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
         self.dr1 = nn.Dropout2d(p=dropout_rate)
         
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        # Layer 2: Intermediate patterns (3-in-a-row detection)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
         self.dr2 = nn.Dropout2d(p=dropout_rate)
+
+        # Layer 3: Larger field of view (Killer Instinct layer)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.dr3 = nn.Dropout2d(p=dropout_rate)
         
+        # Fully Connected layers
+        # Input size: 64 filters * 6 rows * 7 columns = 2688
         self.fc1 = nn.Linear(64 * 6 * 7, 128)
-        self.dr3 = nn.Dropout(p=dropout_rate)
+        self.dr_fc = nn.Dropout(p=dropout_rate)
         self.output = nn.Linear(128, 7)
 
-        # Apply He initialization
+        # Apply He (Kaiming) initialization
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
         
-        # Move the entire model to the specified device immediately
         self.to(self.device)
 
     def forward(self, x):
-        # 1. Convert NumPy to Tensor if needed
+        # 1. Type Handling
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x).float()
         
-        # 2. Ensure input is on the SAME device as the model layers
         x = x.to(self.device)
         
-        # 3. Handle batch dimension
+        # 2. Batch Dimension Check
         if x.dim() == 3:
             x = x.unsqueeze(0)
             
+        # 3. Convolutional Block
         x = torch.relu(self.bn1(self.conv1(x)))
         x = self.dr1(x)
+        
         x = torch.relu(self.bn2(self.conv2(x)))
         x = self.dr2(x)
-        x = x.view(x.size(0), -1)
-        x = torch.relu(self.fc1(x))
+
+        x = torch.relu(self.bn3(self.conv3(x)))
         x = self.dr3(x)
+
+        # 4. Flatten for Linear Layers
+        x = x.view(x.size(0), -1) 
+        
+        # 5. Fully Connected Block
+        x = torch.relu(self.fc1(x))
+        x = self.dr_fc(x)
+        
         return self.output(x)
     
 # Initialize models
@@ -144,7 +168,8 @@ target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 # Simplified Optimizer
-optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate)
+#optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate)
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate, weight_decay=1e-4)
 
 # *****************************************************************
 # Test inference works with the function defined.  Pull examples from the notebook dir.
@@ -293,7 +318,9 @@ def play_self_play_game(policy_net, eps=0.5):
             next_mask = np.zeros(7, dtype=np.float32)
 
         # 4. Add to Replay Buffer
-        replay_buffer.add(state, action, reward, next_state, done, next_mask)
+        #replay_buffer.add(state, action, reward, next_state, done, next_mask)
+        # Note: add_symmetric adds the regular non-flipped and the flipped - so this adds 2 entries
+        replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask) #<-- NEW NEW
         moves_count += 1
     
     # 5. THE BELLMAN NEGATIVE REWARD FIX
@@ -302,7 +329,8 @@ def play_self_play_game(policy_net, eps=0.5):
     if reward == 1.0:
         # We reach into the buffer and update the transition for the opponent
         # -2 refers to the second-to-last item added to the buffer
-        replay_buffer.update_penalty(index=-2, new_reward=-1.0, is_done=True)
+        replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True) #<-- Updated to index =-3 vs. -2
+        replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True) #<-- NEW NEW
     
     return game_states
 """
@@ -404,9 +432,8 @@ def train_dqn_agent(policy_net, optimizer, config):
                 #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
                 states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(
                     config.BATCH_SIZE, 
-                    terminal_ratio=0.25 # Our target ratio
+                    terminal_ratio=config.TERMINAL_RATE # Our target ratio
                 )
-
 
                 s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
                 a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
@@ -419,7 +446,7 @@ def train_dqn_agent(policy_net, optimizer, config):
                     next_q_values = target_net(ns_batch) 
                     masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
                     next_q_max = masked_next_q.max(dim=1)[0]
-                    target_q = r_batch + (config.GAMMA * next_q_max * (1 - d_batch))
+                    target_q = r_batch - (config.GAMMA * next_q_max * (1 - d_batch))
 
                 optimizer.zero_grad()
                 q_values = policy_net(s_batch)
@@ -484,82 +511,6 @@ def train_dqn_agent(policy_net, optimizer, config):
                 print(f"Ep {episode} | Eps: {eps:.2f} | Unique: {len(unique_states_seen)} | WinRate: {win_rate:.2f}")
 
     return policy_net
-
-"""
-def train_dqn_agent(policy_net, optimizer, config):
-    # 1. SETUP
-    target_net = copy.deepcopy(policy_net) 
-    target_net.eval()
-    
-    # Epsilon setup: start high (random), end low (expert)
-    eps = config.EPS_START 
-    
-    for episode in range(1, config.NUM_EPISODES + 1):
-        # 2. SELF PLAY
-        # Pass current epsilon to the game player
-        # play_self_play_game should return the moves or just add them to replay_buffer
-        new_states_seen = play_self_play_game(policy_net, eps) 
-        
-        # Track unique states
-        for s in new_states_seen:
-            # Convert 2x6x7 board to a string or tuple to make it hashable
-            unique_states_seen.add(s.tobytes()) 
-            
-        # 3. EPSILON DECAY
-        eps = max(config.EPS_END, eps * config.EPS_DECAY)
-
-        # 4. TRAINING LOOP (Perform multiple updates per game)
-        # Often we train 'N' times per episode to speed up learning
-        if replay_buffer.is_ready(config.BATCH_SIZE):
-            policy_net.train()
-            
-            for _ in range(config.TRAIN_N_TIMES_PER_GAME): 
-                # Sample and move to device
-                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
-                
-                s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
-                a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
-                r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
-                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
-                d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
-                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
-
-                # CALCULATE TARGETS
-                with torch.no_grad():
-                    next_q_values = target_net(ns_batch) 
-                    masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
-                    next_q_max = masked_next_q.max(dim=1)[0]
-                    # Bellman: r + gamma * max(Q)
-                    # (Note: In your logic, ensure r is relative to the player whose turn it is)
-                    target_q = r_batch + (config.GAMMA * next_q_max * (1 - d_batch))
-
-                # GRADIENT STEP
-                optimizer.zero_grad()
-                q_values = policy_net(s_batch)
-                predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
-                
-                loss = nn.functional.mse_loss(predicted_qs, target_q)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
-                optimizer.step()
-
-            # --- METRICS (Updated for Self-Play) ---
-            loss_history.append(loss.item())
-            q_magnitude_history.append(torch.mean(torch.abs(q_values)).item())
-            unique_states_history.append(len(unique_states_seen))
-
-            # 5. SYNC TARGET NETWORK (e.g., every 50 episodes)
-            if episode % config.TARGET_UPDATE_FREQ == 0:
-                target_net.load_state_dict(policy_net.state_dict())
-                
-            # 6. EVALUATION
-            if episode % 20 == 0:
-                win_rate = evaluate_vs_random(policy_net, num_games=20)
-                win_rate_vs_rand_hist.append(win_rate)
-                print(f"Ep {episode} | Eps: {eps:.2f} | Unique States: {len(unique_states_seen)} | Win Rate: {win_rate:.2f}")
-
-    return policy_net
-"""
                 
 
 # Synthetic training with a contrived replay buffer - prove that the network will learn
@@ -567,40 +518,47 @@ def train_dqn_agent(policy_net, optimizer, config):
 
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
 import copy
-def train_on_synthetic_replay_buffer(policy_net, optimizer):
-    # 1. SETUP: Static buffer and target net
+def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
+    # 1. SETUP: Get the full synthetic buffer
+    # Let's assume this buffer has ~30-50 high-quality examples
     replay_buffer = generate_artificial_replay_buffer_for_training()
     batch_size = 16 
-    target_net = copy.deepcopy(policy_net) 
+    
+    # Initialize Target Net
+    target_net = copy.deepcopy(policy_net)
     target_net.eval()
 
-    # Move batch to device once
-    states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
-    s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
-    a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
-    r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
-    ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
-    d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
-    m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
-
-    policy_net.train()
-
     for episode in range(1, num_episodes + 1):
-        # 3. CALCULATE TARGETS
+        # --- NEW: SAMPLE INSIDE THE LOOP ---
+        # This replicates the randomness of the real training loop
+        states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
+        
+        s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
+        a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
+        r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
+        ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
+        d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
+        m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
+
+        # 2. Calculate Targets using Target Net (eval mode)
+        policy_net.train() # Policy is in train mode (BatchNorm/Dropout active)
         with torch.no_grad():
             next_q_values = target_net(ns_batch) 
             masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
             next_q_max = masked_next_q.max(dim=1)[0]
-            target_q = r_batch - (1 - d_batch) * gamma * next_q_max
+            # Standard Bellman: r + gamma * max(Q_next)
+            target_q = r_batch - (config.GAMMA * next_q_max * (1 - d_batch))
 
-        # 4. GRADIENT STEP
+        # 3. Gradient Step
         optimizer.zero_grad()
         q_values = policy_net(s_batch)
         predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
         
         loss = nn.functional.mse_loss(predicted_qs, target_q)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
+        
+        # Clip Gradients to prevent the "bad Q-values" explosion
+        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
         optimizer.step()
 
         # --- POPULATE METRICS ---
@@ -617,7 +575,7 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
         unique_states_history.append(batch_size)
 
         # 5. Win Rate vs Random (Every 20 episodes)
-        if episode % 20 == 0:
+        if episode % 50 == 0:
             # Note: evaluate_vs_random should call policy_net.eval() internally
             win_rate = evaluate_vs_random(num_games=20)
             win_rate_vs_rand_hist.append(win_rate)
@@ -670,7 +628,8 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     
     # Generate x-axis indices
     episodes = np.arange(len(loss_hist))
-    eval_episodes = np.arange(len(win_rate_hist)) * eval_freq
+    #eval_episodes = np.arange(len(win_rate_hist)) * eval_freq
+    eval_episodes = np.arange(1, len(win_rate_hist) + 1) * eval_freq
 
     # --- Plot 1: Loss ---
     ax = axes[0, 0]
@@ -700,19 +659,20 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 
     # --- Plot 4: Win Rate AND Terminal % ---
     ax = axes[1, 0]
-    # Plot the batch terminal % as a light blue area/line
-    ax.plot(episodes, terminal_pct_hist, color='cyan', alpha=0.3, label='Batch Terminal %')
-    if len(terminal_pct_hist) > 10:
-        smoothed_term = np.convolve(terminal_pct_hist, np.ones(20)/20, mode='valid')
-        ax.plot(episodes[19:], smoothed_term, color='teal', alpha=0.6, label='Avg Terminal %')
-    
-    # Plot the actual Win Rate (Markers)
-    ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', linewidth=2, label='Win Rate vs Random')
-    
-    ax.axhline(y=0.5, color='red', linestyle='--', label='Random (0.5)')
+
+    # This plots every episode (the 25% target line)
+    ax.plot(episodes, terminal_pct_hist, color='cyan', alpha=0.2, label='Batch Terminal %')
+
+    # This plots the Win Rate stretched across the full width
+    ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', 
+            markersize=4, linewidth=2, label='Win Rate vs Random')
+
+    ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.6, label='Random (50%)')
     ax.set_ylim(0, 1.1)
+    ax.set_xlim(0, len(loss_hist)) # Force x-axis to match the full training length
     ax.set_title('Win Rate & Terminal Signal')
-    ax.legend(loc='lower right', fontsize='small')
+    ax.set_xlabel('Episodes')
+    ax.legend(loc='lower right', fontsize='x-small')
     ax.grid(True, alpha=0.3)
 
     # --- Plot 5: NN Health (Combined Dead/Exploding) ---
@@ -736,8 +696,8 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 # *****************************************************************
 # Train, show results
 # *****************************************************************
-train_dqn_agent(policy_net, optimizer, config)                                           # <--- REAL SELF PLAY
-#train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
+#train_dqn_agent(policy_net, optimizer, config)                                           # <--- REAL SELF PLAY
+train_on_synthetic_replay_buffer(policy_net, optimizer, config)    # <--- SYNTHETIC EXPERIENCE
 
 plot_training_metrics(
     loss_history,
@@ -785,8 +745,10 @@ with torch.no_grad():
 #state_tensor = torch.FloatTensor(state).to('cpu')
 #with torch.no_grad():
 #    q_values = policy_net(state_tensor)
-print( "Q Values on synthetic test state: ", q_values )
+print( "Q Values on synthetic test state: " )
+print( q_values )
 
+"""
 print( "Sample flipped state:")
 state = state[:, [1, 0], :, :]
 print( state )
@@ -797,4 +759,4 @@ with torch.no_grad():
 #with torch.no_grad():
 #    q_values = policy_net(state_tensor)
 print( "Q Values on REVERSED test state: ", q_values )
-
+"""

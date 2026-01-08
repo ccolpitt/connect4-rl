@@ -96,6 +96,23 @@ class DQNReplayBuffer:
         self.buffer.append( experience )
         if done:
             self.terminal_buffer.append(experience)
+
+    def add_symmetric(self, state, action, reward, next_state, done, next_mask):
+        # 1. Add original
+        self.add(state, action, reward, next_state, done, next_mask)
+        
+        # 2. Add Mirrored version
+        # state is (2, 6, 7) or (3, 6, 7). We flip on the last dimension (width)
+        state_mirrored = np.flip(state, axis=-1).copy()
+        next_state_mirrored = np.flip(next_state, axis=-1).copy()
+        
+        # Flip action: 0 becomes 6, 1 becomes 5...
+        action_mirrored = 6 - action
+        
+        # Flip mask: [1, 1, 0, 0, 0, 0, 0] becomes [0, 0, 0, 0, 0, 1, 1]
+        next_mask_mirrored = np.flip(next_mask).copy()
+        
+        self.add(state_mirrored, action_mirrored, reward, next_state_mirrored, done, next_mask_mirrored)
     
     def update_penalty( self, index, new_reward, is_done ):
         #self.buffer[index] = self.buffer[index]._replace(reward = new_reward, done=is_done)
@@ -111,7 +128,7 @@ class DQNReplayBuffer:
         if is_done:
             self.terminal_buffer.append(new_transition)
 
-    def sample(self, batch_size: int, indices: List[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int, indices: list = None, terminal_ratio: float = 0.25) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Augmented sample function.
         If indices are provided: returns those specific transitions.
