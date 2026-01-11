@@ -47,6 +47,7 @@ import matplotlib.pyplot as plt
 #num_episodes                = 1000   # Number of games to train on
 batch_size                  = 16
 learning_rate               = 0.00001
+weight_decay                = 1e-4
 training_iterations         = 1     # Training per game
 eval_vs_random_game_count   = 50
 gamma                       = 0.99
@@ -170,6 +171,11 @@ target_net.eval()
 # Simplified Optimizer
 #optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate)
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate, weight_decay=1e-4)
+optimizer = torch.optim.Adam(
+    policy_net.parameters(), 
+    lr=learning_rate, 
+    weight_decay=weight_decay
+)
 
 # *****************************************************************
 # Test inference works with the function defined.  Pull examples from the notebook dir.
@@ -534,6 +540,9 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
     target_net = copy.deepcopy(policy_net)
     target_net.eval()
 
+    # FREEZE BatchNorm and Disable Dropout
+    policy_net.eval()
+
     for episode in range(1, num_episodes + 1):
         # --- NEW: SAMPLE INSIDE THE LOOP ---
         # This replicates the randomness of the real training loop
@@ -745,8 +754,92 @@ plot_training_metrics(
 # Test the trained policy 
 # *****************************************************************
 # Test 1: Test on cases in the replay buffer
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
+def audit_synthetic_performance(policy_net, replay_buffer, config, device):
+    """
+    Evaluates the model on every single example in the synthetic buffer.
+    Outputs a performance table and a visualization of prediction accuracy.
+    """
+    policy_net.eval()
+    results = []
+    
+    # We don't want to sample; we want to see everything
+    # Accessing internal buffer storage (assuming deque or list)
+    all_transitions = list(replay_buffer.buffer)
+    
+    mape_sum = 0
+    count = 0
 
+    print(f"\n--- Synthetic Buffer Audit (Size: {len(all_transitions)}) ---")
+
+    for i, (state, action, reward, next_state, done, next_mask) in enumerate(all_transitions):
+        # 1. Prepare Tensors
+        s_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+        ns_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
+        m_tensor = torch.tensor(next_mask, dtype=torch.float32).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            # 2. Calculate Estimated Reward (Current Prediction)
+            q_values = policy_net(s_tensor)
+            estimated_q = q_values[0][action].item()
+
+            # 3. Calculate Target Reward (Bellman Ground Truth)
+            next_q_values = policy_net(ns_tensor) # Using policy net to check internal consistency
+            masked_next_q = next_q_values.masked_fill(m_tensor == 0, -1e9)
+            next_q_max = masked_next_q.max(dim=1)[0].item()
+            
+            # Negamax target: r - gamma * max_next
+            target_q = reward - (config.GAMMA * next_q_max * (1 - done))
+
+        # 4. Calculate Difference
+        diff = abs(target_q - estimated_q)
+        # Handle division by zero for MAPE by using max(abs(target), 1.0) 
+        # Since our values are capped at 1.0, this gives a conservative error %
+        percent_diff = (diff / max(abs(target_q), 0.1)) * 100
+        
+        mape_sum += percent_diff
+        count += 1
+
+        results.append({
+            'Sample': i,
+            'Target': round(target_q, 3),
+            'Estimate': round(estimated_q, 3),
+            'Abs Diff': round(diff, 3),
+            '% Diff': round(percent_diff, 1)
+        })
+
+    # Create DataFrame for nice display
+    df = pd.DataFrame(results)
+    mape = mape_sum / count
+
+    # --- Visualization ---
+    plt.figure(figsize=(12, 6))
+    x = np.arange(len(df))
+    width = 0.35
+
+    plt.bar(x - width/2, df['Target'], width, label='Target (Truth)', color='skyblue')
+    plt.bar(x + width/2, df['Estimate'], width, label='Estimate (AI)', color='salmon')
+
+    plt.xlabel('Sample Number')
+    plt.ylabel('Q-Value Magnitude')
+    plt.title(f'Target vs. Estimated Q-Values (MAPE: {mape:.2f}%)')
+    plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.show()
+
+    print(df.to_string(index=False))
+    print(f"\nFINAL MAPE: {mape:.2f}%")
+    
+    return df
+
+df = audit_synthetic_performance(policy_net, replay_buffer, config, device)
+print( df )
+
+"""
 test_sample = [0]         # Choose which item in the replay buffer to use
 test_batch_size = len(test_sample)     # Choose a single item from the replay buffer to test
 
