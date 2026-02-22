@@ -16,14 +16,16 @@ End state: agent beats a random opponent >90% of the time, and a human can play 
 
 ## Phase Status
 
+**Last updated:** 2026-02-22 — Test suite: **121 passed, 0 failed**
+
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 0 | ✅ Done | Project briefing & plan |
 | 1 | ✅ Done | pytest harness: `conftest.py`, `pytest.ini`, fixed `tests/test_environment.py` (32 tests) |
 | 2 | ✅ Done | `src/networks/connect4_net.py` (extracted from train_dqn_20251221.py), `tests/test_network.py` (24 tests) |
-| 3 | 🔲 Next | `tests/test_replay_buffer.py` — unit tests for DQNReplayBuffer |
-| 4 | 🔲 Todo | `tests/test_synthetic_learning.py` — idealized buffer → Q values converge ±1 |
-| 5 | 🔲 Todo | `tests/test_training_mechanics.py` — ~300 episode smoke test |
+| 3 | ✅ Done | `tests/test_replay_buffer.py` — 38 unit tests for DQNReplayBuffer |
+| 4 | ✅ Done | `tests/test_synthetic_learning.py` — 19 tests: 100% of win/loss Q-values correct sign at 500 steps |
+| 5 | 🔲 Next | `tests/test_training_mechanics.py` — ~300 episode self-play smoke test |
 | 6 | 🔲 Todo | `src/training/train.py` — full 10k-50k episode training script |
 | 7 | 🔲 Todo | `src/gameplay/play_vs_agent.py` — interactive CLI to play vs trained model |
 | 8 | 🔲 Todo | Iterate arch/hyperparams if win rate stalls below 70% vs random |
