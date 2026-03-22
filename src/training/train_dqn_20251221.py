@@ -134,7 +134,191 @@ DEVICE                      = torch.device("cpu")
 # You may change the configs
 config = Config()
 env = ConnectFourEnvironment(config)
-replay_buffer = DQNReplayBuffer(capacity=replay_buffer_capacity)
+replay_buffer = DQNReplayBuffer(capacity=REPLAY_BUFFER_CAPACITY)
+
+
+# *****************************************************************
+# STEP 1: Environment Validation Tests
+# *****************************************************************
+def run_environment_tests():
+    """Validate core environment functionality before training."""
+    test_env = ConnectFourEnvironment(Config())
+    passed = 0
+    failed = 0
+
+    # Test 1: Reset returns correct shape
+    state = test_env.reset()
+    try:
+        assert state.shape == (2, 6, 7), f"Expected (2,6,7), got {state.shape}"
+        assert state.sum() == 0, "Board should be empty after reset"
+        print("✓ Test 1: Reset returns correct shape and empty board")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 1 FAILED: {e}")
+        failed += 1
+
+    # Test 2: Play a move and verify state changes
+    test_env.reset()
+    next_state, reward, done = test_env.play_move(3)
+    try:
+        assert reward == 0.0, f"First move should have reward 0, got {reward}"
+        assert done == False, "Game should not be done after first move"
+        assert next_state.sum() > 0, "Board should have a piece after move"
+        print("✓ Test 2: Play move returns correct reward and done flag")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 2 FAILED: {e}")
+        failed += 1
+
+    # Test 3: Perspective flipping (critical for negamax)
+    test_env.reset()
+    # Player 1 plays column 3
+    test_env.play_move(3)
+    # Now it's Player 2's turn
+    p1_view = test_env.get_state_from_perspective(1)
+    p2_view = test_env.get_state_from_perspective(-1)
+    try:
+        # P1's pieces in P1's channel 0 should equal P1's pieces in P2's channel 1
+        assert np.array_equal(p1_view[0], p2_view[1]), "P1 pieces should be in P2's opponent channel"
+        assert np.array_equal(p1_view[1], p2_view[0]), "P2 pieces should be in P1's opponent channel"
+        print("✓ Test 3: Perspective flipping swaps channels correctly")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3 FAILED: {e}")
+        failed += 1
+
+    # Test 4: get_state() returns current player's perspective
+    test_env.reset()
+    test_env.play_move(3)  # P1 plays, now it's P2's turn
+    canonical_state = test_env.get_state()
+    p2_perspective = test_env.get_state_from_perspective(-1)
+    try:
+        assert np.array_equal(canonical_state, p2_perspective), \
+            "get_state() should return current player's perspective"
+        print("✓ Test 4: get_state() returns current player's perspective")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4 FAILED: {e}")
+        failed += 1
+
+    # Test 5: play_move returns next_state from NEXT player's perspective
+    test_env.reset()
+    # P1 plays col 0
+    state_before = test_env.get_state()  # P1's perspective
+    next_state, _, _ = test_env.play_move(0)
+    # next_state should be from P2's perspective (P2's pieces in channel 0)
+    p2_view = test_env.get_state_from_perspective(-1)
+    try:
+        assert np.array_equal(next_state, p2_view), \
+            "play_move should return state from NEXT player's perspective"
+        # P1's piece should be in channel 1 of next_state (opponent's channel from P2's view)
+        assert next_state[1, 5, 0] == 1.0, "P1's piece should be in P2's opponent channel"
+        print("✓ Test 5: play_move returns state from next player's perspective")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 5 FAILED: {e}")
+        failed += 1
+
+    # Test 6: Vertical win detection
+    test_env.reset()
+    for _ in range(3):
+        test_env.play_move(0)  # P1
+        test_env.play_move(1)  # P2
+    next_state, reward, done = test_env.play_move(0)  # P1 wins vertically
+    try:
+        assert done == True, "Game should be done after 4-in-a-row"
+        assert reward == 1.0, f"Winner should get +1, got {reward}"
+        print("✓ Test 6: Vertical win detected correctly")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 6 FAILED: {e}")
+        failed += 1
+
+    # Test 7: Horizontal win detection
+    test_env.reset()
+    moves = [(0,6), (1,6), (2,6), (3,None)]  # P1 plays 0,1,2,3; P2 plays 6,6,6
+    for p1_col, p2_col in moves:
+        if p2_col is not None:
+            test_env.play_move(p1_col)
+            test_env.play_move(p2_col)
+        else:
+            next_state, reward, done = test_env.play_move(p1_col)
+    try:
+        assert done == True, "Game should be done after horizontal 4-in-a-row"
+        assert reward == 1.0, f"Winner should get +1, got {reward}"
+        print("✓ Test 7: Horizontal win detected correctly")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 7 FAILED: {e}")
+        failed += 1
+
+    # Test 8: Illegal move raises error
+    test_env.reset()
+    try:
+        test_env.play_move(7)  # Column out of range
+        print("✗ Test 8 FAILED: Should have raised ValueError")
+        failed += 1
+    except ValueError:
+        print("✓ Test 8: Illegal column raises ValueError")
+        passed += 1
+
+    # Test 9: Full column raises error
+    test_env.reset()
+    for i in range(6):
+        test_env.play_move(0)
+        if i < 5:
+            test_env.play_move(1)
+    try:
+        test_env.play_move(0)  # Column 0 is full
+        print("✗ Test 9 FAILED: Should have raised ValueError for full column")
+        failed += 1
+    except ValueError:
+        print("✓ Test 9: Full column raises ValueError")
+        passed += 1
+
+    # Test 10: Legal moves excludes full columns
+    test_env.reset()
+    for i in range(3):
+        test_env.play_move(0)  # P1
+        test_env.play_move(0)  # P2
+    legal = test_env.get_legal_moves()
+    try:
+        assert 0 not in legal, "Full column should not be in legal moves"
+        assert len(legal) == 6, f"Expected 6 legal moves, got {len(legal)}"
+        print("✓ Test 10: Legal moves correctly excludes full columns")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 10 FAILED: {e}")
+        failed += 1
+
+    # Test 11: Negamax Bellman consistency
+    # After P1 plays, the state returned should allow the negamax equation:
+    # Q(s,a) = r - gamma * max(Q(s'))  where s' is from opponent's perspective
+    test_env.reset()
+    state_p1 = test_env.get_state()  # P1's view: my pieces in ch0
+    next_state, reward, done = test_env.play_move(3)  # P1 plays col 3
+    # next_state is from P2's perspective
+    # P2's "my pieces" (ch0) should be empty (P2 hasn't played yet)
+    # P2's "opponent pieces" (ch1) should show P1's piece
+    try:
+        assert next_state[0].sum() == 0, "P2 has no pieces yet, channel 0 should be empty"
+        assert next_state[1].sum() == 1, "P1's piece should appear in P2's opponent channel"
+        assert next_state[1, 5, 3] == 1.0, "P1's piece at row 5, col 3 should be in P2's ch1"
+        print("✓ Test 11: Negamax state representation is consistent")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 11 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 1 Environment Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+    
+    if failed > 0:
+        raise RuntimeError(f"Step 1 FAILED: {failed} test(s) did not pass. Fix before proceeding.")
+
+print("Running Step 1: Environment Validation...")
+run_environment_tests()
 
 #replay_buffer.add( [1,2,3], 0, 0, [2,3,4], False, [1,2,3]) # Test replay buffer - comment out when training
 #replay_buffer.add( [2,3,4], 0, 1, [3,4,5], False, [1,2,3]) # Test replay buffer
@@ -231,20 +415,20 @@ class Connect4Net(nn.Module):
     
 # Initialize models
 # Initialize models
-policy_net = Connect4Net(device=device, dropout_rate=dropout_rate)
-target_net = Connect4Net(device=device, dropout_rate=dropout_rate)
+policy_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
+target_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
 
 # Sync weights
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 # Simplified Optimizer
-#optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate)
-optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate, weight_decay=1e-4)
+#optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 optimizer = torch.optim.Adam(
     policy_net.parameters(), 
-    lr=learning_rate, 
-    weight_decay=weight_decay
+    lr=LEARNING_RATE, 
+    weight_decay=WEIGHT_DECAY
 )
 
 # *****************************************************************
@@ -275,7 +459,7 @@ print( "Initial Player: ", players[0] )
 print( "Initial Board as stored in environment" )
 print( env.get_state() )
 print( "Test Inference ")
-state_tensor = torch.FloatTensor(env.get_state()).to(device)
+state_tensor = torch.FloatTensor(env.get_state()).to(DEVICE)
 q_values = target_net(state_tensor)
 print( "Initial Q Values: ", q_values )
 """
@@ -481,9 +665,9 @@ def train_dqn_agent(policy_net, optimizer):
     target_net = copy.deepcopy(policy_net) 
     target_net.eval()
     
-    eps = eps_start 
+    eps = EPS_START 
     
-    for episode in range(1, num_episodes + 1):
+    for episode in range(1, NUM_EPISODES + 1):
         # 2. SELF PLAY
         new_states_seen = play_self_play_game(policy_net, eps) 
         
@@ -491,10 +675,10 @@ def train_dqn_agent(policy_net, optimizer):
             unique_states_seen.add(s.tobytes()) 
             
         # 3. EPSILON DECAY
-        eps = max(eps_end, eps * eps_decay)
+        eps = max(EPS_END, eps * EPS_DECAY)
 
         # 4. TRAINING LOOP
-        if replay_buffer.is_ready(batch_size):
+        if replay_buffer.is_ready(BATCH_SIZE):
             policy_net.train()
             batch_terminal_counts = []
             
@@ -504,25 +688,25 @@ def train_dqn_agent(policy_net, optimizer):
             last_predicted_qs = None
             last_dones = None
 
-            for _ in range(training_iterations): 
-                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
+            for _ in range(TRAINING_ITERATIONS): 
+                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(BATCH_SIZE)
                 states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(
-                    batch_size, 
-                    terminal_ratio=terminal_rate # Our target ratio
+                    BATCH_SIZE, 
+                    terminal_ratio=TERMINAL_RATE # Our target ratio
                 )
 
-                s_batch = torch.tensor(states, dtype=torch.float32).to(device)
-                a_batch = torch.tensor(actions, dtype=torch.long).to(device)
-                r_batch = torch.tensor(rewards, dtype=torch.float32).to(device)
-                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(device)
-                d_batch = torch.tensor(dones, dtype=torch.float32).to(device)
-                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(device)
+                s_batch = torch.tensor(states, dtype=torch.float32).to(DEVICE)
+                a_batch = torch.tensor(actions, dtype=torch.long).to(DEVICE)
+                r_batch = torch.tensor(rewards, dtype=torch.float32).to(DEVICE)
+                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(DEVICE)
+                d_batch = torch.tensor(dones, dtype=torch.float32).to(DEVICE)
+                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(DEVICE)
 
                 with torch.no_grad():
                     next_q_values = target_net(ns_batch) 
                     masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
                     next_q_max = masked_next_q.max(dim=1)[0]
-                    target_q = r_batch - (gamma * next_q_max * (1 - d_batch))
+                    target_q = r_batch - (GAMMA * next_q_max * (1 - d_batch))
 
                 optimizer.zero_grad()
                 q_values = policy_net(s_batch)
@@ -577,7 +761,7 @@ def train_dqn_agent(policy_net, optimizer):
             terminal_pct_history.append(np.mean(batch_terminal_counts))
 
             # 5. SYNC TARGET NETWORK
-            if episode % target_update_freq == 0:
+            if episode % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
                 
             # 6. EVALUATION
@@ -594,9 +778,9 @@ def train_dqn_agent(policy_net, optimizer):
 # *****************************************************************
 # Use this to prove that the network will learn Q estimates for win and loss
 # example state / action pairs
-num_episodes = 200
-batch_size = 16
-target_sync_frequency = 1   # If 1, we sync every episode.  Changes to supervised learning
+SYNTHETIC_NUM_EPISODES = 200
+SYNTHETIC_BATCH_SIZE = 16
+SYNTHETIC_TARGET_SYNC_FREQ = 1   # If 1, we sync every episode.  Changes to supervised learning
 
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
 import copy
@@ -613,10 +797,10 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
     # FREEZE BatchNorm and Disable Dropout
     policy_net.eval()
 
-    for episode in range(1, num_episodes + 1):
+    for episode in range(1, SYNTHETIC_NUM_EPISODES + 1):
         # --- NEW: SAMPLE INSIDE THE LOOP ---
         # This replicates the randomness of the real training loop
-        states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
+        states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(SYNTHETIC_BATCH_SIZE)
         
         # Test that sampling is working - print out
         """
@@ -636,12 +820,12 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
         """
 
         # Convert to tensors
-        s_batch = torch.tensor(states, dtype=torch.float32).to(device)
-        a_batch = torch.tensor(actions, dtype=torch.long).to(device)
-        r_batch = torch.tensor(rewards, dtype=torch.float32).to(device)
-        ns_batch = torch.tensor(next_states, dtype=torch.float32).to(device)
-        d_batch = torch.tensor(dones, dtype=torch.float32).to(device)
-        m_batch = torch.tensor(next_masks, dtype=torch.float32).to(device)
+        s_batch = torch.tensor(states, dtype=torch.float32).to(DEVICE)
+        a_batch = torch.tensor(actions, dtype=torch.long).to(DEVICE)
+        r_batch = torch.tensor(rewards, dtype=torch.float32).to(DEVICE)
+        ns_batch = torch.tensor(next_states, dtype=torch.float32).to(DEVICE)
+        d_batch = torch.tensor(dones, dtype=torch.float32).to(DEVICE)
+        m_batch = torch.tensor(next_masks, dtype=torch.float32).to(DEVICE)
 
         # 2. Calculate Targets using Target Net (eval mode)
         policy_net.train() # Policy is in train mode (BatchNorm/Dropout active)
@@ -649,8 +833,8 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
             next_q_values = target_net(ns_batch) 
             masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
             next_q_max = masked_next_q.max(dim=1)[0]
-            # Standard Bellman: r + gamma * max(Q_next)
-            target_q = r_batch - (gamma * next_q_max * (1 - d_batch))
+            # Standard Bellman: r + GAMMA * max(Q_next)
+            target_q = r_batch - (GAMMA * next_q_max * (1 - d_batch))
 
         # 3. Gradient Step
         optimizer.zero_grad()
@@ -665,7 +849,7 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
         optimizer.step()
 
         # Periodically sync target newtork with policy network
-        if (episode % target_sync_frequency == 0 and len(q_magnitude_history) > 0):
+        if (episode % SYNTHETIC_TARGET_SYNC_FREQ == 0 and len(q_magnitude_history) > 0):
             target_net.load_state_dict(policy_net.state_dict())
             print(f"Ep {episode} | Loss: {loss.item():.4f} | Q-Mag: {q_magnitude_history[-1]:.2f} | Grad: {grad_history[-1]:.6f}")
 
@@ -680,7 +864,7 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
         q_magnitude_history_win_loss.append(torch.mean(torch.abs(predicted_qs)).item())
 
         # 4. Unique States (Static at 16 for this test)
-        unique_states_history.append(batch_size)
+        unique_states_history.append(SYNTHETIC_BATCH_SIZE)
 
         # 5. Win Rate vs Random (Every 20 episodes)
         if episode % 50 == 0:
@@ -863,7 +1047,7 @@ def audit_synthetic_performance(policy_net, replay_buffer, device):
             next_q_max = masked_next_q.max(dim=1)[0].item()
             
             # Negamax target: r - gamma * max_next
-            target_q = reward - (gamma * next_q_max * (1 - done))
+            target_q = reward - (GAMMA * next_q_max * (1 - done))
 
         # 4. Calculate Difference
         diff = abs(target_q - estimated_q)
@@ -906,7 +1090,7 @@ def audit_synthetic_performance(policy_net, replay_buffer, device):
     
     return df
 
-df = audit_synthetic_performance(policy_net, replay_buffer, device)
+df = audit_synthetic_performance(policy_net, replay_buffer, DEVICE)
 print( df )
 
 """
