@@ -36,7 +36,7 @@ of the steps are complete, but please check.
 7: Test the play vs. human function.  Don't create a unit test because the human doesn't want
     to have to play every time we run the file, but test that this works once, so that you can
     have the human play a highly-trained agent.
-6: Implement training tracking
+8: Implement training tracking
     Avg Abs Q Value prediction
     Avg Abs Q Value of Win/Loss position prediction (only where is_done = True)
     NN Loss by training event
@@ -48,15 +48,15 @@ of the steps are complete, but please check.
         agent, recalculate this vector.  Then, during training evaluation, verify that the 
         curves start to decrease from 1 to zero.  If this curve does not decline as training
         continues, there is a problem.
-7: Test whether we are correctly implementing the negamax bellman update.  Do we correctly return
+9: Test whether we are correctly implementing the negamax bellman update.  Do we correctly return
     the state from the current player's perspective?  Ie - I think we want to flip the state when
     we subtract off the max of the next Q values.  Note we may have already done this when 
     validating the environment.
-7: Use the prioritized replay buffer during training.  If we're not using it, it's a huge miss.  Verify that we
+10: Use the prioritized replay buffer during training.  If we're not using it, it's a huge miss.  Verify that we
     are using it.  Print out in a unit test, if this is not already done.
-8: make sure that we have a high discount rate - like 0.99 or 0.999, so that we don't lose the loss
+11: make sure that we have a high discount rate - like 0.99 or 0.999, so that we don't lose the loss
     signal
-7: Implement champion-challenger training.  Save a policy network that
+12: Implement champion-challenger training.  Save a policy network that
     is a champion.  At the beginning of each episode, toss a fair dice to decide which player
     goes first.  The champion player ALWAYS plays greedy.  I'm not actually sure how we decide 
     when to overwrite the champion with a new challenger.  I think each TRAIN_VS_CHAMPTION_EPISODES
@@ -64,7 +64,7 @@ of the steps are complete, but please check.
     challenger vs. champion, and switch when it wins more than say 60% of the time - but we could
     parameterize.  I think we want the challenger to not use epsilon when evaluating vs. the 
     champion - but we can discuss.
-6: Perspective threat test - after training,  test with three in a row from play 1 and 2 perspective.  
+13: Perspective threat test - after training,  test with three in a row from play 1 and 2 perspective.  
     Verify that  Q values change a lot.  If player 1 has three in a row, the Q values of next moves 
     should be very high - at least for the winning moves.  If player 2 is FACING three in a row, 
     verify that Q values are close to -1 for moves that fail to block.  Work this in as a policy unit
@@ -74,7 +74,7 @@ of the steps are complete, but please check.
     average of the Q values of the winning moves for the offense situation, and the average of the
     Q values that fail to block in the defensive situation.  The winning move Q values should approach
     1, and the failed defensive Q values should approach -1.  if they do not, something is wrong.
-7: Iterate on training.  Run training on a sufficient number of games to yield a pretty good trained
+14: Iterate on training.  Run training on a sufficient number of games to yield a pretty good trained
     agent.  this should mean promoting several new champion policies.  based on what you see, 
     hypothesize on what to improve, make the changes, and measure the results.  Anything in this
     file is fair game to change.  You can change the policy network.  You can change hyper-params.
@@ -83,18 +83,9 @@ of the steps are complete, but please check.
     values are learned.  The approach you figure out should generalize to other games and problems.
     I also don't want to use brute-force MCTS.  The DQN should learn to estimate the value making a
     move in a state.  Stop iterating when you suspect you have an agent that will beat the human.
-    Another thing to try is temporal-difference error sampling from the replay buffer. 
-
-
-
-
-
-7: New things to try, based on talk with Gemini:
-  - Implement challenger / champion model.  Flip a coin on which player is playing the champion
-  policy and which player is the challenger.  Champion always plays the champion policy, and
-  challenger follows the eps-greedy approach.
-  - Use temporal-difference replay buffer sampling vs. last move sampling
-  - 
+    Two things to try:
+        Temporal-difference error sampling from the replay buffer.
+        Eligibility traces.  Start with lambda value of 0.9
 
 """
 
@@ -132,8 +123,9 @@ evaluation_frequency        = 10    # Evaluate every 10 episodes
 
 
 # *****************************************************************
-# Create environment, Replay Buffer
+# Create environment, Replay Buffer - 
 # *****************************************************************
+# You may change the configs
 config = Config()
 env = ConnectFourEnvironment(config)
 replay_buffer = DQNReplayBuffer(capacity=20000)
