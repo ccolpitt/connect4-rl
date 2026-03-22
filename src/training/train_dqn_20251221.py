@@ -337,44 +337,48 @@ print( replay_buffer.sample(1,[-2]))
 
 
 # *****************************************************************
-# Create Network
+# STEP 2: Network Architecture
 # *****************************************************************
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import copy
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
 class Connect4Net(nn.Module):
+    """
+    CNN for Connect4 Q-value estimation.
+    Input: (batch, 2, 6, 7) — channel 0 = my pieces, channel 1 = opponent pieces
+    Output: (batch, 7) — Q-value for each column
+    
+    Architecture: 3 conv layers (64 filters, 3x3, padding=1) with BatchNorm,
+    followed by FC layers. Receptive field after 3 layers = 7x7, covering
+    the full board width — important for detecting diagonal threats.
+    """
     def __init__(self, device, dropout_rate=0.2):
         super(Connect4Net, self).__init__()
         self.device = device
         
-        # Layer 1: Initial feature extraction
+        # Conv block 1: Initial feature extraction
         self.conv1 = nn.Conv2d(2, 64, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(64)
         self.dr1 = nn.Dropout2d(p=dropout_rate)
         
-        # Layer 2: Intermediate patterns (3-in-a-row detection)
+        # Conv block 2: Pattern detection (2-in-a-row, 3-in-a-row)
         self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
         self.dr2 = nn.Dropout2d(p=dropout_rate)
 
-        # Layer 3: Larger field of view (Killer Instinct layer)
+        # Conv block 3: Full-board patterns (threats, forks)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(64)
         self.dr3 = nn.Dropout2d(p=dropout_rate)
         
-        # Fully Connected layers
-        # Input size: 64 filters * 6 rows * 7 columns = 2688
+        # Fully connected: 64 filters * 6 rows * 7 cols = 2688
         self.fc1 = nn.Linear(64 * 6 * 7, 128)
         self.dr_fc = nn.Dropout(p=dropout_rate)
         self.output = nn.Linear(128, 7)
 
-        # Apply He (Kaiming) initialization
+        # He (Kaiming) initialization for ReLU networks
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -384,36 +388,126 @@ class Connect4Net(nn.Module):
         self.to(self.device)
 
     def forward(self, x):
-        # 1. Type Handling
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x).float()
-        
         x = x.to(self.device)
-        
-        # 2. Batch Dimension Check
         if x.dim() == 3:
             x = x.unsqueeze(0)
             
-        # 3. Convolutional Block
         x = torch.relu(self.bn1(self.conv1(x)))
         x = self.dr1(x)
-        
         x = torch.relu(self.bn2(self.conv2(x)))
         x = self.dr2(x)
-
         x = torch.relu(self.bn3(self.conv3(x)))
         x = self.dr3(x)
 
-        # 4. Flatten for Linear Layers
         x = x.view(x.size(0), -1) 
-        
-        # 5. Fully Connected Block
         x = torch.relu(self.fc1(x))
         x = self.dr_fc(x)
-        
         return self.output(x)
+
+
+# *****************************************************************
+# Step 2: Network Validation Tests
+# *****************************************************************
+def run_network_tests():
+    """Validate network architecture and inference."""
+    test_device = torch.device("cpu")
+    net = Connect4Net(device=test_device, dropout_rate=0.0)
+    net.eval()
+    passed = 0
+    failed = 0
+
+    # Test 1: Output shape for single state
+    state = np.zeros((2, 6, 7), dtype=np.float32)
+    try:
+        with torch.no_grad():
+            q_values = net(state)
+        assert q_values.shape == (1, 7), f"Expected (1,7), got {q_values.shape}"
+        print("✓ Test 2.1: Single state produces (1,7) Q-values")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.1 FAILED: {e}")
+        failed += 1
+
+    # Test 2: Output shape for batch
+    batch = np.zeros((16, 2, 6, 7), dtype=np.float32)
+    try:
+        with torch.no_grad():
+            q_values = net(torch.tensor(batch))
+        assert q_values.shape == (16, 7), f"Expected (16,7), got {q_values.shape}"
+        print("✓ Test 2.2: Batch of 16 produces (16,7) Q-values")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.2 FAILED: {e}")
+        failed += 1
+
+    # Test 3: Different inputs produce different outputs
+    state_a = np.zeros((2, 6, 7), dtype=np.float32)
+    state_b = np.zeros((2, 6, 7), dtype=np.float32)
+    state_b[0, 5, 3] = 1.0  # Place a piece
+    try:
+        with torch.no_grad():
+            q_a = net(state_a)
+            q_b = net(state_b)
+        assert not torch.allclose(q_a, q_b), "Different states should produce different Q-values"
+        print("✓ Test 2.3: Different inputs produce different Q-values")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.3 FAILED: {e}")
+        failed += 1
+
+    # Test 4: Deterministic in eval mode (no dropout noise)
+    try:
+        with torch.no_grad():
+            q1 = net(state_a)
+            q2 = net(state_a)
+        assert torch.allclose(q1, q2), "Eval mode should be deterministic"
+        print("✓ Test 2.4: Eval mode produces deterministic output")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.4 FAILED: {e}")
+        failed += 1
+
+    # Test 5: Gradient flows through all layers
+    net.train()
+    test_input = torch.randn(4, 2, 6, 7, requires_grad=False).to(test_device)
+    target = torch.randn(4, 7).to(test_device)
+    try:
+        output = net(test_input)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        all_have_grad = all(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in net.parameters() if p.requires_grad
+        )
+        assert all_have_grad, "Some parameters have no gradient"
+        print("✓ Test 2.5: Gradients flow through all layers")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.5 FAILED: {e}")
+        failed += 1
+
+    # Test 6: Parameter count is reasonable
+    total_params = sum(p.numel() for p in net.parameters())
+    try:
+        assert 100_000 < total_params < 500_000, f"Param count {total_params} seems off"
+        print(f"✓ Test 2.6: Parameter count = {total_params:,} (reasonable range)")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 2.6 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 2 Network Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
     
-# Initialize models
+    if failed > 0:
+        raise RuntimeError(f"Step 2 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 2: Network Validation...")
+run_network_tests()
+
 # Initialize models
 policy_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
 target_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
