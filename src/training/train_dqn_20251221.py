@@ -86,6 +86,9 @@ of the steps are complete, but please check.
     Two things to try:
         Temporal-difference error sampling from the replay buffer.
         Eligibility traces.  Start with lambda value of 0.9
+15: Stretch goal - remove the heuristic where we hard-code the second
+    to last move with a reward of -1, and is_done = true.  Consider this as something
+    to try in step 14 as well.
 
 """
 
@@ -107,22 +110,22 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Training Hyperparameters (all in one place)
 # *****************************************************************
-num_episodes                = 500
-batch_size                  = 128
-learning_rate               = 0.00001
-weight_decay                = 1e-4
-training_iterations         = 4       # Training steps per game
-eval_vs_random_game_count   = 50
-gamma                       = 0.99
-evaluation_frequency        = 10      # Evaluate every N episodes
-eps_start                   = 0.5
-eps_end                     = 0.2
-eps_decay                   = 0.9999
-target_update_freq          = 100
-terminal_rate               = 0.3     # Target terminal ratio in batch sampling
-dropout_rate                = 0.00
-replay_buffer_capacity      = 20000
-device                      = torch.device("cpu")
+NUM_EPISODES                = 500
+BATCH_SIZE                  = 128
+LEARNING_RATE               = 0.00001
+WEIGHT_DECAY                = 1e-4
+TRAINING_ITERATIONS         = 4       # Training steps per game
+EVAL_VS_RANDOM_GAME_COUNT   = 50
+GAMMA                       = 0.99
+EVALUATION_FREQUENCY        = 10      # Evaluate every N episodes
+EPS_START                   = 0.5
+EPS_END                     = 0.2
+EPS_DECAY                   = 0.9999
+TARGET_UPDATE_FREQ          = 100
+TERMINAL_RATE               = 0.3     # Target terminal ratio in batch sampling
+DROPOUT_RATE                = 0.00
+REPLAY_BUFFER_CAPACITY      = 20000
+DEVICE                      = torch.device("cpu")
 
 
 # *****************************************************************
