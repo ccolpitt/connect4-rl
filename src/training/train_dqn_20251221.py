@@ -105,21 +105,24 @@ from src.utils import DQNReplayBuffer
 import matplotlib.pyplot as plt
 
 # *****************************************************************
-# Constants
+# Training Hyperparameters (all in one place)
 # *****************************************************************
-#num_episodes                = 1000   # Number of games to train on
-batch_size                  = 16
+num_episodes                = 500
+batch_size                  = 128
 learning_rate               = 0.00001
 weight_decay                = 1e-4
-training_iterations         = 1     # Training per game
+training_iterations         = 4       # Training steps per game
 eval_vs_random_game_count   = 50
 gamma                       = 0.99
-evaluation_frequency        = 10    # Evaluate every 10 episodes
-#eval_games: int = 100
-#health_check_freq: int = 500
-#save_freq: int = 5000
-#model_save_path: str = None
-#plot_save_path: str = None
+evaluation_frequency        = 10      # Evaluate every N episodes
+eps_start                   = 0.5
+eps_end                     = 0.2
+eps_decay                   = 0.9999
+target_update_freq          = 100
+terminal_rate               = 0.3     # Target terminal ratio in batch sampling
+dropout_rate                = 0.00
+replay_buffer_capacity      = 20000
+device                      = torch.device("cpu")
 
 
 # *****************************************************************
@@ -128,7 +131,7 @@ evaluation_frequency        = 10    # Evaluate every 10 episodes
 # You may change the configs
 config = Config()
 env = ConnectFourEnvironment(config)
-replay_buffer = DQNReplayBuffer(capacity=20000)
+replay_buffer = DQNReplayBuffer(capacity=replay_buffer_capacity)
 
 #replay_buffer.add( [1,2,3], 0, 0, [2,3,4], False, [1,2,3]) # Test replay buffer - comment out when training
 #replay_buffer.add( [2,3,4], 0, 1, [3,4,5], False, [1,2,3]) # Test replay buffer
@@ -224,9 +227,9 @@ class Connect4Net(nn.Module):
         return self.output(x)
     
 # Initialize models
-my_device = torch.device("cpu")
-policy_net = Connect4Net(device=my_device, dropout_rate=config.DROPOUT_RATE)
-target_net = Connect4Net(device=my_device, dropout_rate=config.DROPOUT_RATE)
+# Initialize models
+policy_net = Connect4Net(device=device, dropout_rate=dropout_rate)
+target_net = Connect4Net(device=device, dropout_rate=dropout_rate)
 
 # Sync weights
 target_net.load_state_dict(policy_net.state_dict())
@@ -269,7 +272,7 @@ print( "Initial Player: ", players[0] )
 print( "Initial Board as stored in environment" )
 print( env.get_state() )
 print( "Test Inference ")
-state_tensor = torch.FloatTensor(env.get_state()).to(Config.DEVICE)
+state_tensor = torch.FloatTensor(env.get_state()).to(device)
 q_values = target_net(state_tensor)
 print( "Initial Q Values: ", q_values )
 """
@@ -470,14 +473,14 @@ grad_history = []           # 8: Should stay constant, or decrease
 terminal_pct_history = []   # Initialize new history list
 unique_states_seen = set()
 
-def train_dqn_agent(policy_net, optimizer, config):
+def train_dqn_agent(policy_net, optimizer):
     # 1. SETUP
     target_net = copy.deepcopy(policy_net) 
     target_net.eval()
     
-    eps = config.EPS_START 
+    eps = eps_start 
     
-    for episode in range(1, config.NUM_EPISODES + 1):
+    for episode in range(1, num_episodes + 1):
         # 2. SELF PLAY
         new_states_seen = play_self_play_game(policy_net, eps) 
         
@@ -485,10 +488,10 @@ def train_dqn_agent(policy_net, optimizer, config):
             unique_states_seen.add(s.tobytes()) 
             
         # 3. EPSILON DECAY
-        eps = max(config.EPS_END, eps * config.EPS_DECAY)
+        eps = max(eps_end, eps * eps_decay)
 
         # 4. TRAINING LOOP
-        if replay_buffer.is_ready(config.BATCH_SIZE):
+        if replay_buffer.is_ready(batch_size):
             policy_net.train()
             batch_terminal_counts = []
             
@@ -498,25 +501,25 @@ def train_dqn_agent(policy_net, optimizer, config):
             last_predicted_qs = None
             last_dones = None
 
-            for _ in range(config.TRAIN_N_TIMES_PER_GAME): 
-                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(config.BATCH_SIZE)
+            for _ in range(training_iterations): 
+                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(batch_size)
                 states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(
-                    config.BATCH_SIZE, 
-                    terminal_ratio=config.TERMINAL_RATE # Our target ratio
+                    batch_size, 
+                    terminal_ratio=terminal_rate # Our target ratio
                 )
 
-                s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
-                a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
-                r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
-                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
-                d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
-                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
+                s_batch = torch.tensor(states, dtype=torch.float32).to(device)
+                a_batch = torch.tensor(actions, dtype=torch.long).to(device)
+                r_batch = torch.tensor(rewards, dtype=torch.float32).to(device)
+                ns_batch = torch.tensor(next_states, dtype=torch.float32).to(device)
+                d_batch = torch.tensor(dones, dtype=torch.float32).to(device)
+                m_batch = torch.tensor(next_masks, dtype=torch.float32).to(device)
 
                 with torch.no_grad():
                     next_q_values = target_net(ns_batch) 
                     masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
                     next_q_max = masked_next_q.max(dim=1)[0]
-                    target_q = r_batch - (config.GAMMA * next_q_max * (1 - d_batch))
+                    target_q = r_batch - (gamma * next_q_max * (1 - d_batch))
 
                 optimizer.zero_grad()
                 q_values = policy_net(s_batch)
@@ -571,7 +574,7 @@ def train_dqn_agent(policy_net, optimizer, config):
             terminal_pct_history.append(np.mean(batch_terminal_counts))
 
             # 5. SYNC TARGET NETWORK
-            if episode % config.TARGET_UPDATE_FREQ == 0:
+            if episode % target_update_freq == 0:
                 target_net.load_state_dict(policy_net.state_dict())
                 
             # 6. EVALUATION
@@ -595,7 +598,7 @@ target_sync_frequency = 1   # If 1, we sync every episode.  Changes to supervise
 from notebooks.training_examples_last_2_moves_20251221 import generate_artificial_replay_buffer_for_training
 import copy
 
-def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
+def train_on_synthetic_replay_buffer(policy_net, optimizer):
     # 1. SETUP: Get the full synthetic buffer
     # Let's assume this buffer has ~30-50 high-quality examples
     replay_buffer = generate_artificial_replay_buffer_for_training()    
@@ -630,12 +633,12 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
         """
 
         # Convert to tensors
-        s_batch = torch.tensor(states, dtype=torch.float32).to(my_device)
-        a_batch = torch.tensor(actions, dtype=torch.long).to(my_device)
-        r_batch = torch.tensor(rewards, dtype=torch.float32).to(my_device)
-        ns_batch = torch.tensor(next_states, dtype=torch.float32).to(my_device)
-        d_batch = torch.tensor(dones, dtype=torch.float32).to(my_device)
-        m_batch = torch.tensor(next_masks, dtype=torch.float32).to(my_device)
+        s_batch = torch.tensor(states, dtype=torch.float32).to(device)
+        a_batch = torch.tensor(actions, dtype=torch.long).to(device)
+        r_batch = torch.tensor(rewards, dtype=torch.float32).to(device)
+        ns_batch = torch.tensor(next_states, dtype=torch.float32).to(device)
+        d_batch = torch.tensor(dones, dtype=torch.float32).to(device)
+        m_batch = torch.tensor(next_masks, dtype=torch.float32).to(device)
 
         # 2. Calculate Targets using Target Net (eval mode)
         policy_net.train() # Policy is in train mode (BatchNorm/Dropout active)
@@ -644,7 +647,7 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer, config):
             masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
             next_q_max = masked_next_q.max(dim=1)[0]
             # Standard Bellman: r + gamma * max(Q_next)
-            target_q = r_batch - (config.GAMMA * next_q_max * (1 - d_batch))
+            target_q = r_batch - (gamma * next_q_max * (1 - d_batch))
 
         # 3. Gradient Step
         optimizer.zero_grad()
@@ -792,8 +795,8 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
 # *****************************************************************
 # Train, show results
 # *****************************************************************
-#train_dqn_agent(policy_net, optimizer, config)                                           # <--- REAL SELF PLAY
-train_on_synthetic_replay_buffer(policy_net, optimizer, config)    # <--- SYNTHETIC EXPERIENCE
+#train_dqn_agent(policy_net, optimizer)                                           # <--- REAL SELF PLAY
+train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
 
 plot_training_metrics(
     loss_history,
@@ -823,7 +826,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-def audit_synthetic_performance(policy_net, replay_buffer, config, device):
+def audit_synthetic_performance(policy_net, replay_buffer, device):
     """
     Evaluates the model on every single example in the synthetic buffer.
     Outputs a performance table and a visualization of prediction accuracy.
@@ -857,7 +860,7 @@ def audit_synthetic_performance(policy_net, replay_buffer, config, device):
             next_q_max = masked_next_q.max(dim=1)[0].item()
             
             # Negamax target: r - gamma * max_next
-            target_q = reward - (config.GAMMA * next_q_max * (1 - done))
+            target_q = reward - (gamma * next_q_max * (1 - done))
 
         # 4. Calculate Difference
         diff = abs(target_q - estimated_q)
@@ -900,7 +903,7 @@ def audit_synthetic_performance(policy_net, replay_buffer, config, device):
     
     return df
 
-df = audit_synthetic_performance(policy_net, replay_buffer, config, my_device)
+df = audit_synthetic_performance(policy_net, replay_buffer, device)
 print( df )
 
 """
