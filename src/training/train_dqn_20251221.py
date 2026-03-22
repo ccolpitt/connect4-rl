@@ -24,6 +24,13 @@ This will iteratively build up DQN training.
     Unique States Explored
 6: Perspective test - test with three in a row from play 1 and 2 perspective.  Verify that 
     Q values also change a lot.
+7: New things to try, based on talk with Gemini:
+  - Implement challenger / champion model.  Flip a coin on which player is playing the champion
+  policy and which player is the challenger.  Champion always plays the champion policy, and
+  challenger follows the eps-greedy approach.
+  - Use temporal-difference replay buffer sampling vs. last move sampling
+  - 
+
 """
 
 
@@ -836,7 +843,7 @@ def audit_synthetic_performance(policy_net, replay_buffer, config, device):
     
     return df
 
-df = audit_synthetic_performance(policy_net, replay_buffer, config, device)
+df = audit_synthetic_performance(policy_net, replay_buffer, config, my_device)
 print( df )
 
 """
