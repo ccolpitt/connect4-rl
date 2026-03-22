@@ -40,22 +40,6 @@ class Config:
     PLAYER_2 = -1
     DRAW_VALUE = 0
 
-    # Neural Net Constants
-    DROPOUT_RATE = 0.00
-
-    # Training Constants
-    NUM_EPISODES = 500
-    EPS_START   = 0.5
-    EPS_END     = 0.2
-    EPS_DECAY   = 0.9999
-    TRAIN_N_TIMES_PER_GAME  = 4
-    GAMMA       = 0.99
-    TARGET_UPDATE_FREQ      = 100
-
-    # Replay Buffer Sampling Constants
-    TERMINAL_RATE = 0.3
-    BATCH_SIZE  = 128
-
     # Device: auto-selected by src/utils/device.py
     # Uses MPS if all safety checks pass, otherwise CPU.
     # Call `python src/utils/device.py` to see selection reason.
