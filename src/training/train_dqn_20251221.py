@@ -5,25 +5,90 @@
 """
 Docstring for train_dqn_20251221
 
-This will iteratively build up DQN training.
-1: Create environment -- DONE
-2: Create manual network based on what worked in manual_nn_training_test_20251221_v2 -- DONE
-3: Play a single self-play game.  Use Eps Greedy with constant eps. -- DONE
+Below is a plan that you the training Claude LLM agent should follow.  Step through this with the
+human, and create unit tests that validate each step is done, each time the file is run.
+I'd like to only update this file.  If you find errors in the environment, please flag, but ask for
+permission to edit the file.  You do not need permission to update the code portion of this file.
+Just review the results with the human before progressing to the next step.  The human thinks some
+of the steps are complete, but please check.
+1: Create environment.  Test that the environment's key functions work.  Especially, check whether
+    the state flipping logic works, so that the negamax bellman equation work.
+2: Create manual network based on what worked in manual_nn_training_test_20251221_v2.  During training
+    runs, feel free to revisit the network architecture if you think we're missing patterns, or if
+    you think the architecture is more complex, or you think we're missing other features in the
+    network, such as regularization, or other optimizations that you're aware of based on best
+    practices of neural network design, or recent research.  Please make hypotheses during training
+    that include network architecture improvements.
+3: Play a single self-play game.  Use Eps Greedy with constant eps.
     If greedy, do inference on state, and sample from the response - softmax
     At the end of the episode, if there was a winner, make sure is_done is true
     Also, override second to last reward to -1, and is_done to True
-4: Play an ensemble of games to populate the replay buffer -- DONE
-5: Train based on the replay buffer -- DONE
+    Verify this happens, and create a unit test.
+4: Play an ensemble of games to populate the replay buffer.  Ensure that the win/loss entries
+    are correctly populated, and create a unit test.
+5: Train based on the replay buffer.  Verify that the network has the capacity to reduce its loss.
     Train 100 times on static replay buffer, sampling independently; verify loss goes down
-    Once replay buffer is ready, train X times per Y games, samping Z samples; verify loss decreases
-6: Implement training tracking - DONE
+    Once replay buffer is ready, train X times per Y games, samping Z samples; verify loss decreases.
+    During the final training testing, iteration loop, consider changes to the replay buffer, or
+    how to prioritize samples in the replay buffer, such as with TD sampling.
+6: Verify that using the CPU vs. MPS yields the same inference values, and trains exactly the same.
+    If MPS doesn't line up with CPU within a very small tolerance, then raise an error.
+7: Test the play vs. human function.  Don't create a unit test because the human doesn't want
+    to have to play every time we run the file, but test that this works once, so that you can
+    have the human play a highly-trained agent.
+6: Implement training tracking
     Avg Abs Q Value prediction
     Avg Abs Q Value of Win/Loss position prediction (only where is_done = True)
     NN Loss by training event
     Win rate vs. random
     Unique States Explored
-6: Perspective test - test with three in a row from play 1 and 2 perspective.  Verify that 
-    Q values also change a lot.
+    Graph of abs(max(Q(state))), where x-axis is move since end.  First entry will always be
+        the final state.  The abs(max) should approach 1 for games where a player wins.
+        initialize the vector of size 42 to zero.  Then each time we calculate the win vs. random
+        agent, recalculate this vector.  Then, during training evaluation, verify that the 
+        curves start to decrease from 1 to zero.  If this curve does not decline as training
+        continues, there is a problem.
+7: Test whether we are correctly implementing the negamax bellman update.  Do we correctly return
+    the state from the current player's perspective?  Ie - I think we want to flip the state when
+    we subtract off the max of the next Q values.  Note we may have already done this when 
+    validating the environment.
+7: Use the prioritized replay buffer during training.  If we're not using it, it's a huge miss.  Verify that we
+    are using it.  Print out in a unit test, if this is not already done.
+8: make sure that we have a high discount rate - like 0.99 or 0.999, so that we don't lose the loss
+    signal
+7: Implement champion-challenger training.  Save a policy network that
+    is a champion.  At the beginning of each episode, toss a fair dice to decide which player
+    goes first.  The champion player ALWAYS plays greedy.  I'm not actually sure how we decide 
+    when to overwrite the champion with a new challenger.  I think each TRAIN_VS_CHAMPTION_EPISODES
+    we should face off with the current challenger policy.  Or, we track the win/loss rate for the 
+    challenger vs. champion, and switch when it wins more than say 60% of the time - but we could
+    parameterize.  I think we want the challenger to not use epsilon when evaluating vs. the 
+    champion - but we can discuss.
+6: Perspective threat test - after training,  test with three in a row from play 1 and 2 perspective.  
+    Verify that  Q values change a lot.  If player 1 has three in a row, the Q values of next moves 
+    should be very high - at least for the winning moves.  If player 2 is FACING three in a row, 
+    verify that Q values are close to -1 for moves that fail to block.  Work this in as a policy unit
+    test during training.  Every time we evaluate a policy vs. random, or whatever, we should also
+    evaluate whether the Q values for an offensive three in a row show close to 1, and Q values for
+    a failed defensive move are close to -1.  Add this to the training set of metrics.  Take the
+    average of the Q values of the winning moves for the offense situation, and the average of the
+    Q values that fail to block in the defensive situation.  The winning move Q values should approach
+    1, and the failed defensive Q values should approach -1.  if they do not, something is wrong.
+7: Iterate on training.  Run training on a sufficient number of games to yield a pretty good trained
+    agent.  this should mean promoting several new champion policies.  based on what you see, 
+    hypothesize on what to improve, make the changes, and measure the results.  Anything in this
+    file is fair game to change.  You can change the policy network.  You can change hyper-params.
+    You can decide to measure new things.  One thing you may not do is (1) change the environment, (2)
+    use reward shaping, or (3) use MCTS.  You may not use knowledge of the game to cheat, and speed up how the Q
+    values are learned.  The approach you figure out should generalize to other games and problems.
+    I also don't want to use brute-force MCTS.  The DQN should learn to estimate the value making a
+    move in a state.  Stop iterating when you suspect you have an agent that will beat the human.
+    Another thing to try is temporal-difference error sampling from the replay buffer. 
+
+
+
+
+
 7: New things to try, based on talk with Gemini:
   - Implement challenger / champion model.  Flip a coin on which player is playing the champion
   policy and which player is the challenger.  Champion always plays the champion policy, and
