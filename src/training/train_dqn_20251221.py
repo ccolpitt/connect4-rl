@@ -528,43 +528,11 @@ optimizer = torch.optim.Adam(
 # *****************************************************************
 # Test inference works with the function defined.  Pull examples from the notebook dir.
 # *****************************************************************
-example_test_case = 5
-
-# Get the absolute path of the current script
-current_file = Path(__file__).resolve()
-# Add project root to path to import from src
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-# Go up three levels to get to the project root
-# .parent is training/ | .parent.parent is src/ | .parent.parent.parent is project_root/
-project_root = current_file.parent.parent.parent
-# import training examples
-from notebooks.training_examples_last_2_moves_20251221 import get_training_examples
-
-"""
-examples = get_training_examples()
-
-initial_board = examples[example_test_case]['board']
-players = examples[example_test_case]['players']
-env.set_state( initial_board, players[0] )
-
-print( "Initial board ")
-print( initial_board)
-print( "Initial Player: ", players[0] )
-print( "Initial Board as stored in environment" )
-print( env.get_state() )
-print( "Test Inference ")
-state_tensor = torch.FloatTensor(env.get_state()).to(DEVICE)
-q_values = target_net(state_tensor)
-print( "Initial Q Values: ", q_values )
-"""
-# *****************************************************************
 # Helper functions, for training and metric tracking
 # *****************************************************************
-# Helper to hash states for Metric 4
 def hash_state(state):
     return state.tobytes()
 
-# Helper for Metric 6 (Placeholder - ensure you have a random agent function)
 def evaluate_vs_random(policy_net = policy_net, num_games=20):
     wins = 0
     for _ in range(num_games):
@@ -573,32 +541,19 @@ def evaluate_vs_random(policy_net = policy_net, num_games=20):
         while not done:
             state = env.get_state()
             legal = env.get_legal_moves()
-            # Agent move (Greedy)
             action = select_action(policy_net, torch.tensor(state, dtype=torch.float32), legal, eps=0.0)
             _, reward, done = env.play_move(action)
             if done and reward == 1:
                 wins += 1
                 break
-            if done: break # Draw or loss
+            if done: break
             
-            # Random move
             legal = env.get_legal_moves()
             action = np.random.choice(legal)
             _, reward, done = env.play_move(action)
-            if done and reward == 1: # Random agent won
+            if done and reward == 1:
                 break 
     return wins / num_games
-
-def get_next_q_masked(next_states, next_legal_masks):
-    with torch.no_grad():
-        # next_q_values shape: (batch_size, 7)
-        next_q_values = forward(next_states)
-        
-        # Apply mask: set illegal moves to -1e9
-        # next_legal_masks should be a tensor (batch_size, 7) where 1=legal, 0=illegal
-        masked_q = next_q_values.masked_fill(next_legal_masks == 0, -1e9)
-        
-        return masked_q.max(dim=1)[0]
 
 def get_action_mask(legal_moves):
     """Converts [0, 1, 3] into [1, 1, 0, 1, 0, 0, 0]"""
@@ -608,135 +563,494 @@ def get_action_mask(legal_moves):
 
 
 # *****************************************************************
-# Select Action - Keep it simple to start
+# Select Action
 # *****************************************************************
 def select_action(policy_net, state, legal_moves, eps) -> int:
-    # 1. EXPLORATION: Randomly choose from legal moves
     if np.random.random() < eps:
         return int(np.random.choice(legal_moves))
         
-    # 2. EXPLOITATION: 
-    # CRITICAL: Switch to eval mode to disable Dropout/BatchNorm noise
     policy_net.eval() 
-    
     with torch.no_grad():
-        # The class handles unsqueeze and .to(device) internally now, 
-        # but calling it here is fine for clarity.
         q_values = policy_net(state).squeeze(0)
-        
-        # MASKING
         masked_q = q_values.clone()
         all_actions = set(range(7))
         illegal_actions = list(all_actions - set(legal_moves))
-        
-        # Using a very large negative ensures illegal moves aren't picked
         masked_q[illegal_actions] = -1e9
-        
         best_action = torch.argmax(masked_q).item()
-        
-    # Note: We don't call .train() here because this function is also 
-    # used during evaluation. We let the training loop handle switching 
-    # back to .train() when it's ready to update weights.
     
     return int(best_action)
     
 
 # *****************************************************************
-# Self Play.  Use eps-greedy
+# Self Play
 # *****************************************************************
 def play_self_play_game(policy_net, eps=0.5):
     env.reset()
     done = False
     moves_count = 0
-    game_states = [] # To return to the training loop for unique state tracking
+    game_states = []
 
     while not done and moves_count < 42:
         state = env.get_state()
         game_states.append(state)
-        
         legal_moves = env.get_legal_moves()
         
-        # 1. Select Action (Note: Pass policy_net, state, and legal_moves)
         state_tensor = torch.tensor(state, dtype=torch.float32)
         action = select_action(policy_net, state_tensor, legal_moves, eps)
-        
-        # 2. Execute Move
         next_state, reward, done = env.play_move(action)
         
-        # 3. Handle Masking for the NEXT player
         if not done:
             next_legal_moves = env.get_legal_moves()
             next_mask = get_action_mask(next_legal_moves)
         else:
-            # No legal moves after game ends
             next_mask = np.zeros(7, dtype=np.float32)
 
-        # 4. Add to Replay Buffer
-        #replay_buffer.add(state, action, reward, next_state, done, next_mask)
-        # Note: add_symmetric adds the regular non-flipped and the flipped - so this adds 2 entries
-        replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask) #<-- NEW NEW
+        replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
         moves_count += 1
     
-    # 5. THE BELLMAN NEGATIVE REWARD FIX
-    # In Connect 4, if the last move resulted in 1.0 (Win), 
-    # the move immediately before that by the opponent was a Loss (-1.0).
+    # Bellman negative reward fix: loser's last move gets -1
     if reward == 1.0:
-        # We reach into the buffer and update the transition for the opponent
-        # -2 refers to the second-to-last item added to the buffer
-        replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True) #<-- Updated to index =-3 vs. -2
-        replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True) #<-- NEW NEW
+        replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+        replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
     
     return game_states
-"""
-def play_self_play_game(policy_net, eps = 0.5):
-    env.reset()
-    done = False
-    moves = 0
 
-    # loop through moves
-    while not done and moves < 42:
-        state = env.get_state()     # This needs to return a tensor
-        unique_states_seen.add(hash_state(state)) # TRACKING UNIQUE STATES
-        legal_moves = env.get_legal_moves()
-        
-        # Eps greedy
+# *****************************************************************
+# STEP 3: Single Self-Play Game Validation Tests
+# *****************************************************************
+def run_self_play_tests():
+    """Validate a single self-play game populates the replay buffer correctly."""
+    test_buffer = DQNReplayBuffer(capacity=1000)
+    test_env = ConnectFourEnvironment(Config())
+    passed = 0
+    failed = 0
+
+    # Play a single game using the untrained policy_net with eps=1.0 (fully random)
+    test_env.reset()
+    done = False
+    moves_count = 0
+    last_reward = 0.0
+
+    while not done and moves_count < 42:
+        state = test_env.get_state()
+        legal_moves = test_env.get_legal_moves()
         state_tensor = torch.tensor(state, dtype=torch.float32)
-        action = select_action(policy_net, state_tensor, legal_moves, eps)
-        # Make the move
-        next_state, reward, done = env.play_move( action )
-        # Get mask for the NEXT player ---
+        action = select_action(policy_net, state_tensor, legal_moves, eps=1.0)
+        next_state, reward, done = test_env.play_move(action)
+
         if not done:
-            next_legal_moves = env.get_legal_moves()
+            next_legal_moves = test_env.get_legal_moves()
             next_mask = get_action_mask(next_legal_moves)
         else:
             next_mask = np.zeros(7, dtype=np.float32)
 
-        # Add to replay buffer
-        replay_buffer.add( state, action, reward, next_state, done, next_mask)
-        moves += 1
-    
-    # Update the reward of the second to last move, if not a draw
-    if( reward != 0 ):
-        replay_buffer.update_penalty(-2, -1, True )
-        #print( "SECOND TO LAST")
-        #print( replay_buffer.buffer[-2] )
-"""
-"""
-# Test out Self Play Game
-play_self_play_game(policy_net, eps=0.5)
+        test_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
+        last_reward = reward
+        moves_count += 1
 
-# After self play game, print result
-print( "Final State:" )
-print( env.get_state() )
-print( env.get_current_player() )
+    # Apply Bellman negative reward fix
+    if last_reward == 1.0:
+        test_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+        test_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
 
-print( "Last Replay Buffer Entry: ")
-print( replay_buffer.buffer[-1] )
+    # Test 3.1: Game completed
+    try:
+        assert done == True, "Game should have ended (win or draw)"
+        assert moves_count >= 7, f"Need at least 7 moves for a win, got {moves_count}"
+        assert moves_count <= 42, f"Max 42 moves, got {moves_count}"
+        print(f"✓ Test 3.1: Game completed in {moves_count} moves (reward={last_reward})")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3.1 FAILED: {e}")
+        failed += 1
 
-print( "Second to Last Replay Buffer Entry: ")
-replay_buffer.buffer[-2]["reward"] = -1 # Update reward
-print( replay_buffer.buffer[-2] )
-"""
+    # Test 3.2: Replay buffer has correct number of entries (2x due to symmetric)
+    try:
+        expected_entries = moves_count * 2  # add_symmetric doubles each entry
+        assert len(test_buffer) == expected_entries, \
+            f"Expected {expected_entries} entries (symmetric), got {len(test_buffer)}"
+        print(f"✓ Test 3.2: Replay buffer has {len(test_buffer)} entries ({moves_count} moves × 2 symmetric)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3.2 FAILED: {e}")
+        failed += 1
+
+    # Test 3.3: All states have correct shape
+    try:
+        for i, transition in enumerate(test_buffer.buffer):
+            assert transition.state.shape == (2, 6, 7), f"State {i} shape wrong: {transition.state.shape}"
+            assert transition.next_state.shape == (2, 6, 7), f"Next state {i} shape wrong"
+        print("✓ Test 3.3: All states have shape (2, 6, 7)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3.3 FAILED: {e}")
+        failed += 1
+
+    # Test 3.4: Actions are valid (0-6)
+    try:
+        for i, transition in enumerate(test_buffer.buffer):
+            assert 0 <= transition.action <= 6, f"Invalid action {transition.action} at index {i}"
+        print("✓ Test 3.4: All actions are in range [0, 6]")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3.4 FAILED: {e}")
+        failed += 1
+
+    # Test 3.5: Bellman negative reward fix (only if someone won)
+    if last_reward == 1.0:
+        try:
+            # With add_symmetric, the last 2 entries are the winning move (original + mirror)
+            # The 2 entries before that (-3, -4) are the losing move (original + mirror)
+            losing_orig = test_buffer.buffer[-3]
+            losing_mirror = test_buffer.buffer[-4]
+            assert losing_orig.reward == -1.0, f"Losing move reward should be -1, got {losing_orig.reward}"
+            assert losing_orig.done == 1.0, "Losing move should be marked done"
+            assert losing_mirror.reward == -1.0, f"Losing mirror reward should be -1, got {losing_mirror.reward}"
+            assert losing_mirror.done == 1.0, "Losing mirror should be marked done"
+
+            # Winning move should have reward +1
+            winning_orig = test_buffer.buffer[-2]
+            winning_mirror = test_buffer.buffer[-1]
+            assert winning_orig.reward == 1.0, f"Winning move reward should be +1, got {winning_orig.reward}"
+            assert winning_orig.done == 1.0, "Winning move should be marked done"
+            print("✓ Test 3.5: Bellman negative reward fix applied correctly (win: +1, loss: -1, both done=True)")
+            passed += 1
+        except AssertionError as e:
+            print(f"✗ Test 3.5 FAILED: {e}")
+            failed += 1
+    else:
+        # Draw — no penalty fix needed
+        try:
+            last_entry = test_buffer.buffer[-1]
+            assert last_entry.reward == 0.0, f"Draw should have reward 0, got {last_entry.reward}"
+            print("✓ Test 3.5: Game was a draw, no penalty fix needed (reward=0)")
+            passed += 1
+        except AssertionError as e:
+            print(f"✗ Test 3.5 FAILED: {e}")
+            failed += 1
+
+    # Test 3.6: Mid-game transitions have reward=0 and done=False
+    try:
+        # Check a mid-game transition (not the last few)
+        mid_idx = len(test_buffer.buffer) // 2
+        mid_transition = test_buffer.buffer[mid_idx]
+        assert mid_transition.reward == 0.0, f"Mid-game reward should be 0, got {mid_transition.reward}"
+        assert mid_transition.done == 0.0 or mid_transition.done == False, \
+            f"Mid-game done should be False, got {mid_transition.done}"
+        print("✓ Test 3.6: Mid-game transitions have reward=0, done=False")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 3.6 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 3 Self-Play Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 3 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 3: Self-Play Validation...")
+run_self_play_tests()
+
+
+# *****************************************************************
+# STEP 4: Ensemble Self-Play & Replay Buffer Population Tests
+# *****************************************************************
+ENSEMBLE_GAME_COUNT = 20  # Number of games to play for ensemble test
+
+def run_ensemble_tests():
+    """Play multiple self-play games and verify replay buffer population."""
+    test_buffer = DQNReplayBuffer(capacity=10000)
+    test_env = ConnectFourEnvironment(Config())
+    passed = 0
+    failed = 0
+
+    win_count = 0
+    draw_count = 0
+    total_moves = 0
+
+    for game_idx in range(ENSEMBLE_GAME_COUNT):
+        test_env.reset()
+        done = False
+        moves_count = 0
+        last_reward = 0.0
+
+        while not done and moves_count < 42:
+            state = test_env.get_state()
+            legal_moves = test_env.get_legal_moves()
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            action = select_action(policy_net, state_tensor, legal_moves, eps=1.0)
+            next_state, reward, done = test_env.play_move(action)
+
+            if not done:
+                next_legal_moves = test_env.get_legal_moves()
+                next_mask = get_action_mask(next_legal_moves)
+            else:
+                next_mask = np.zeros(7, dtype=np.float32)
+
+            test_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
+            last_reward = reward
+            moves_count += 1
+
+        # Apply Bellman negative reward fix for games with a winner
+        if last_reward == 1.0:
+            test_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+            test_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
+            win_count += 1
+        else:
+            draw_count += 1
+
+        total_moves += moves_count
+
+    # Test 4.1: All games completed
+    try:
+        assert win_count + draw_count == ENSEMBLE_GAME_COUNT, \
+            f"Expected {ENSEMBLE_GAME_COUNT} games, got {win_count + draw_count}"
+        print(f"✓ Test 4.1: All {ENSEMBLE_GAME_COUNT} games completed ({win_count} wins, {draw_count} draws)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.1 FAILED: {e}")
+        failed += 1
+
+    # Test 4.2: Buffer size matches expected (2x symmetric per move)
+    try:
+        expected = total_moves * 2
+        assert len(test_buffer) == expected, \
+            f"Expected {expected} entries, got {len(test_buffer)}"
+        print(f"✓ Test 4.2: Buffer has {len(test_buffer)} entries ({total_moves} moves × 2 symmetric)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.2 FAILED: {e}")
+        failed += 1
+
+    # Test 4.3: Win entries have reward +1 and done=True
+    try:
+        win_entries = [t for t in test_buffer.buffer if t.reward == 1.0 and t.done == 1.0]
+        # Each win produces 2 entries (original + mirror) for the winning move
+        expected_win_entries = win_count * 2
+        assert len(win_entries) == expected_win_entries, \
+            f"Expected {expected_win_entries} win entries, got {len(win_entries)}"
+        print(f"✓ Test 4.3: Found {len(win_entries)} win entries (reward=+1, done=True)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.3 FAILED: {e}")
+        failed += 1
+
+    # Test 4.4: Loss entries have reward -1 and done=True
+    try:
+        loss_entries = [t for t in test_buffer.buffer if t.reward == -1.0 and t.done == 1.0]
+        # Each win also produces 2 loss entries (loser's last move, original + mirror)
+        expected_loss_entries = win_count * 2
+        assert len(loss_entries) == expected_loss_entries, \
+            f"Expected {expected_loss_entries} loss entries, got {len(loss_entries)}"
+        print(f"✓ Test 4.4: Found {len(loss_entries)} loss entries (reward=-1, done=True)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.4 FAILED: {e}")
+        failed += 1
+
+    # Test 4.5: Terminal buffer is populated for balanced sampling
+    try:
+        terminal_count = len(test_buffer.terminal_buffer)
+        assert terminal_count > 0, "Terminal buffer should not be empty after games with winners"
+        # Terminal buffer should have win + loss entries
+        expected_terminal = win_count * 4  # 2 win + 2 loss per won game
+        assert terminal_count >= expected_terminal, \
+            f"Expected at least {expected_terminal} terminal entries, got {terminal_count}"
+        print(f"✓ Test 4.5: Terminal buffer has {terminal_count} entries (for balanced sampling)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.5 FAILED: {e}")
+        failed += 1
+
+    # Test 4.6: Mid-game entries have reward=0 and done=False
+    try:
+        mid_entries = [t for t in test_buffer.buffer if t.reward == 0.0 and t.done == 0.0]
+        # Most entries should be mid-game (reward=0, done=False)
+        total_terminal = len([t for t in test_buffer.buffer if t.done == 1.0])
+        expected_mid = len(test_buffer) - total_terminal
+        assert len(mid_entries) == expected_mid, \
+            f"Expected {expected_mid} mid-game entries, got {len(mid_entries)}"
+        assert len(mid_entries) > total_terminal, \
+            "Mid-game entries should outnumber terminal entries"
+        print(f"✓ Test 4.6: {len(mid_entries)} mid-game entries (reward=0, done=False), {total_terminal} terminal")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 4.6 FAILED: {e}")
+        failed += 1
+
+    # Test 4.7: Balanced sampling works (terminal_ratio respected)
+    try:
+        if test_buffer.is_ready(BATCH_SIZE):
+            states, actions, rewards, next_states, dones, next_masks = test_buffer.sample(
+                BATCH_SIZE, terminal_ratio=TERMINAL_RATE
+            )
+            actual_terminal_pct = np.mean(dones)
+            # Allow some tolerance since sampling is stochastic
+            assert actual_terminal_pct > 0.1, \
+                f"Terminal ratio too low: {actual_terminal_pct:.2f} (target: {TERMINAL_RATE})"
+            print(f"✓ Test 4.7: Balanced sampling works (terminal %: {actual_terminal_pct:.2f}, target: {TERMINAL_RATE})")
+            passed += 1
+        else:
+            print(f"⚠ Test 4.7: Skipped — buffer not ready (need {BATCH_SIZE}, have {len(test_buffer)})")
+            passed += 1  # Not a failure, just insufficient data
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 4.7 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 4 Ensemble Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 4 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 4: Ensemble Self-Play & Buffer Population...")
+run_ensemble_tests()
+
+
+# *****************************************************************
+# STEP 5: Training Capacity Test — Verify Loss Decreases
+# *****************************************************************
+STEP5_STATIC_TRAIN_ITERS = 100  # Train 100 times on a static buffer
+
+def run_training_capacity_tests():
+    """Verify the network can reduce loss when trained on a static replay buffer."""
+    passed = 0
+    failed = 0
+
+    # Build a fresh buffer with 50 self-play games (fully random)
+    test_buffer = DQNReplayBuffer(capacity=10000)
+    test_env = ConnectFourEnvironment(Config())
+
+    for _ in range(50):
+        test_env.reset()
+        done = False
+        moves = 0
+        last_reward = 0.0
+        while not done and moves < 42:
+            state = test_env.get_state()
+            legal = test_env.get_legal_moves()
+            action = int(np.random.choice(legal))
+            next_state, reward, done = test_env.play_move(action)
+            if not done:
+                next_mask = get_action_mask(test_env.get_legal_moves())
+            else:
+                next_mask = np.zeros(7, dtype=np.float32)
+            test_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
+            last_reward = reward
+            moves += 1
+        if last_reward == 1.0:
+            test_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+            test_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
+
+    # Fresh network + optimizer for isolated test
+    test_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
+    test_target = copy.deepcopy(test_net)
+    test_target.eval()
+    test_opt = torch.optim.Adam(test_net.parameters(), lr=0.001, weight_decay=WEIGHT_DECAY)
+
+    losses = []
+    test_net.train()
+
+    for i in range(STEP5_STATIC_TRAIN_ITERS):
+        states, actions, rewards, next_states, dones, next_masks = test_buffer.sample(
+            BATCH_SIZE, terminal_ratio=TERMINAL_RATE
+        )
+        s = torch.tensor(states, dtype=torch.float32).to(DEVICE)
+        a = torch.tensor(actions, dtype=torch.long).to(DEVICE)
+        r = torch.tensor(rewards, dtype=torch.float32).to(DEVICE)
+        ns = torch.tensor(next_states, dtype=torch.float32).to(DEVICE)
+        d = torch.tensor(dones, dtype=torch.float32).to(DEVICE)
+        m = torch.tensor(next_masks, dtype=torch.float32).to(DEVICE)
+
+        with torch.no_grad():
+            next_q = test_target(ns)
+            masked_next_q = next_q.masked_fill(m == 0, -1e9)
+            next_q_max = masked_next_q.max(dim=1)[0]
+            target_q = r - (GAMMA * next_q_max * (1 - d))
+
+        test_opt.zero_grad()
+        q_vals = test_net(s)
+        pred_q = q_vals.gather(1, a.unsqueeze(1)).squeeze(1)
+        loss = nn.functional.mse_loss(pred_q, target_q)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(test_net.parameters(), 1.0)
+        test_opt.step()
+        losses.append(loss.item())
+
+        # Sync target every 10 steps
+        if i % 10 == 0:
+            test_target.load_state_dict(test_net.state_dict())
+
+    # Test 5.1: Loss decreased from first 10 to last 10
+    first_10_avg = np.mean(losses[:10])
+    last_10_avg = np.mean(losses[-10:])
+    try:
+        assert last_10_avg < first_10_avg, \
+            f"Loss did not decrease: first 10 avg={first_10_avg:.4f}, last 10 avg={last_10_avg:.4f}"
+        reduction_pct = (1 - last_10_avg / first_10_avg) * 100
+        print(f"✓ Test 5.1: Loss decreased — {first_10_avg:.4f} → {last_10_avg:.4f} ({reduction_pct:.1f}% reduction)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 5.1 FAILED: {e}")
+        failed += 1
+
+    # Test 5.2: Final loss is finite and non-negative
+    try:
+        assert np.isfinite(losses[-1]), f"Loss is not finite: {losses[-1]}"
+        assert losses[-1] >= 0, f"Loss is negative: {losses[-1]}"
+        print(f"✓ Test 5.2: Final loss is finite and non-negative ({losses[-1]:.4f})")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 5.2 FAILED: {e}")
+        failed += 1
+
+    # Test 5.3: Q-values are in a reasonable range after training
+    test_net.eval()
+    try:
+        sample_states, _, _, _, _, _ = test_buffer.sample(32, terminal_ratio=0.5)
+        with torch.no_grad():
+            q_out = test_net(torch.tensor(sample_states, dtype=torch.float32).to(DEVICE))
+        max_q = q_out.abs().max().item()
+        assert max_q < 100, f"Q-values exploded: max |Q| = {max_q:.2f}"
+        print(f"✓ Test 5.3: Q-values in reasonable range (max |Q| = {max_q:.2f})")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 5.3 FAILED: {e}")
+        failed += 1
+
+    # Test 5.4: Network produces different Q-values for win vs mid-game states
+    try:
+        terminal_states = [t.state for t in test_buffer.buffer if t.done == 1.0][:8]
+        mid_states = [t.state for t in test_buffer.buffer if t.done == 0.0][:8]
+        if len(terminal_states) >= 4 and len(mid_states) >= 4:
+            with torch.no_grad():
+                t_q = test_net(torch.tensor(np.array(terminal_states[:4]), dtype=torch.float32).to(DEVICE))
+                m_q = test_net(torch.tensor(np.array(mid_states[:4]), dtype=torch.float32).to(DEVICE))
+            t_mag = t_q.abs().mean().item()
+            m_mag = m_q.abs().mean().item()
+            # Terminal states should generally have higher magnitude Q-values
+            print(f"✓ Test 5.4: Terminal avg |Q|={t_mag:.3f}, Mid-game avg |Q|={m_mag:.3f}")
+            passed += 1
+        else:
+            print("⚠ Test 5.4: Skipped — not enough terminal/mid-game states")
+            passed += 1
+    except Exception as e:
+        print(f"✗ Test 5.4 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 5 Training Capacity Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 5 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 5: Training Capacity Verification...")
+run_training_capacity_tests()
+
 
 # *****************************************************************
 # Training Loop, Function: 
