@@ -125,7 +125,7 @@ TARGET_UPDATE_FREQ          = 100
 TERMINAL_RATE               = 0.3     # Target terminal ratio in batch sampling
 DROPOUT_RATE                = 0.00
 REPLAY_BUFFER_CAPACITY      = 20000
-DEVICE                      = torch.device("cpu")
+DEVICE                      = torch.device(Config().DEVICE)  # Auto-detected: MPS if safe, else CPU
 
 
 # *****************************************************************
@@ -1050,6 +1050,106 @@ def run_training_capacity_tests():
 
 print("Running Step 5: Training Capacity Verification...")
 run_training_capacity_tests()
+
+
+# *****************************************************************
+# STEP 6: MPS/CPU Parity Check
+# *****************************************************************
+def run_mps_parity_tests():
+    """Verify MPS and CPU produce identical inference and training results."""
+    passed = 0
+    failed = 0
+
+    mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    if not mps_available:
+        print("⚠ MPS not available on this machine — skipping parity tests")
+        print(f"  DEVICE is set to: {DEVICE}")
+        print(f"\n{'='*50}")
+        print(f"Step 6 MPS Parity Tests: skipped (no MPS)")
+        print(f"{'='*50}\n")
+        return
+
+    # Test 6.1: Forward pass parity — same weights, same input, same output
+    try:
+        torch.manual_seed(42)
+        net_cpu = Connect4Net(device=torch.device("cpu"), dropout_rate=0.0)
+        net_cpu.eval()
+
+        net_mps = Connect4Net(device=torch.device("mps"), dropout_rate=0.0)
+        net_mps.load_state_dict(net_cpu.state_dict())
+        net_mps.eval()
+
+        test_input = torch.randn(8, 2, 6, 7)
+        with torch.no_grad():
+            out_cpu = net_cpu(test_input).numpy()
+            out_mps = net_mps(test_input.to("mps")).cpu().numpy()
+
+        max_diff = float(np.abs(out_cpu - out_mps).max())
+        assert max_diff < 5e-3, f"CPU/MPS forward drift: {max_diff:.2e}"
+        assert np.all(np.isfinite(out_mps)), "MPS produced NaN/Inf"
+        print(f"✓ Test 6.1: Forward pass parity (max diff: {max_diff:.2e})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 6.1 FAILED: {e}")
+        failed += 1
+
+    # Test 6.2: Single training step parity — loss should be close
+    try:
+        torch.manual_seed(99)
+        net_cpu = Connect4Net(device=torch.device("cpu"), dropout_rate=0.0)
+        net_cpu.train()
+        opt_cpu = torch.optim.Adam(net_cpu.parameters(), lr=0.001)
+
+        net_mps = Connect4Net(device=torch.device("mps"), dropout_rate=0.0)
+        net_mps.load_state_dict(net_cpu.state_dict())
+        net_mps.train()
+        opt_mps = torch.optim.Adam(net_mps.parameters(), lr=0.001)
+
+        s_in = torch.randn(16, 2, 6, 7)
+        targets = torch.randn(16)
+
+        # CPU step
+        opt_cpu.zero_grad()
+        q_cpu = net_cpu(s_in)[:, 3]
+        loss_cpu = nn.functional.mse_loss(q_cpu, targets)
+        loss_cpu.backward()
+        opt_cpu.step()
+
+        # MPS step
+        opt_mps.zero_grad()
+        q_mps = net_mps(s_in.to("mps"))[:, 3]
+        loss_mps = nn.functional.mse_loss(q_mps, targets.to("mps"))
+        loss_mps.backward()
+        opt_mps.step()
+
+        loss_diff = abs(loss_cpu.item() - loss_mps.item())
+        assert loss_diff < 0.01, f"Training loss drift: {loss_diff:.4f}"
+        assert np.isfinite(loss_mps.item()), "MPS loss is not finite"
+        print(f"✓ Test 6.2: Training step parity (loss diff: {loss_diff:.6f})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 6.2 FAILED: {e}")
+        failed += 1
+
+    # Test 6.3: Confirm DEVICE is set to MPS
+    try:
+        assert str(DEVICE) == "mps", f"DEVICE should be 'mps' but is '{DEVICE}'"
+        print(f"✓ Test 6.3: DEVICE correctly set to MPS for training acceleration")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 6.3 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 6 MPS Parity Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 6 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 6: MPS/CPU Parity Check...")
+run_mps_parity_tests()
 
 
 # *****************************************************************
