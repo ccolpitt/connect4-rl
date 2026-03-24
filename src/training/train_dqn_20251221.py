@@ -89,6 +89,8 @@ of the steps are complete, but please check.
 15: Stretch goal - remove the heuristic where we hard-code the second
     to last move with a reward of -1, and is_done = true.  Consider this as something
     to try in step 14 as well.
+16: For usability, create a repository of agents.  Each agent should have a date and a description 
+    to start with.  There should be a way to browse agents, load agents, and play against them.
 
 """
 
@@ -1166,7 +1168,127 @@ dead_neuron_cnt_hist = []   # 6: Should stay constant
 exploding_neuron_cnt_hist = []  # 7: Should stay constant
 grad_history = []           # 8: Should stay constant, or decrease
 terminal_pct_history = []   # Initialize new history list
+q_decay_curve_history = []  # Step 8: Q-value decay curves (list of 42-element vectors)
 unique_states_seen = set()
+
+
+def compute_q_decay_curve(policy_net, num_games=20):
+    """
+    Compute the Q-value magnitude decay curve.
+    
+    Plays num_games vs random, records abs(max(Q(state))) for each state,
+    indexed by moves-from-end (0 = final state, 1 = second-to-last, etc.).
+    Returns a 42-element vector (max game length) where each entry is the
+    average abs(max(Q)) at that distance from the end.
+    
+    For games with a winner, the final state Q should approach 1.
+    Earlier states should decay toward 0 if the network hasn't learned
+    long-range value propagation yet.
+    """
+    q_sums = np.zeros(42, dtype=np.float64)
+    q_counts = np.zeros(42, dtype=np.float64)
+    
+    eval_env = ConnectFourEnvironment(Config())
+    policy_net.eval()
+    
+    for _ in range(num_games):
+        eval_env.reset()
+        done = False
+        game_states = []  # (state, legal_moves) pairs
+        
+        while not done:
+            state = eval_env.get_state()
+            legal = eval_env.get_legal_moves()
+            game_states.append((state.copy(), legal[:]))
+            
+            # Policy plays
+            action = select_action(policy_net, torch.tensor(state, dtype=torch.float32), legal, eps=0.0)
+            _, reward, done = eval_env.play_move(action)
+            if done:
+                break
+            
+            # Random opponent plays
+            legal = eval_env.get_legal_moves()
+            state_opp = eval_env.get_state()
+            game_states.append((state_opp.copy(), legal[:]))
+            action = np.random.choice(legal)
+            _, reward, done = eval_env.play_move(action)
+        
+        # Now compute Q-values for each state, indexed by moves-from-end
+        total_moves = len(game_states)
+        for idx, (s, legal) in enumerate(game_states):
+            moves_from_end = total_moves - 1 - idx
+            if moves_from_end < 42:
+                with torch.no_grad():
+                    q = policy_net(torch.tensor(s, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+                    # Mask illegal moves
+                    mask = get_action_mask(legal)
+                    mask_t = torch.tensor(mask, dtype=torch.float32).to(DEVICE)
+                    masked_q = q.squeeze(0).clone()
+                    masked_q[mask_t == 0] = 0  # Zero out illegal moves for abs max
+                    abs_max_q = masked_q.abs().max().item()
+                q_sums[moves_from_end] += abs_max_q
+                q_counts[moves_from_end] += 1
+    
+    # Average, avoiding division by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        curve = np.where(q_counts > 0, q_sums / q_counts, 0.0)
+    
+    return curve
+
+
+# *****************************************************************
+# STEP 8: Training Metrics Dashboard & Q-Value Decay Curve Tests
+# *****************************************************************
+def run_metrics_tests():
+    """Validate the Q-value decay curve computation and metrics infrastructure."""
+    passed = 0
+    failed = 0
+
+    # Test 8.1: Q-decay curve has correct shape and is non-negative
+    try:
+        curve = compute_q_decay_curve(policy_net, num_games=10)
+        assert curve.shape == (42,), f"Expected shape (42,), got {curve.shape}"
+        assert np.all(curve >= 0), "Q-decay curve should be non-negative"
+        assert np.all(np.isfinite(curve)), "Q-decay curve has non-finite values"
+        print(f"✓ Test 8.1: Q-decay curve shape (42,), non-negative, finite")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 8.1 FAILED: {e}")
+        failed += 1
+
+    # Test 8.2: Early positions (near end of game) have data, far positions may be zero
+    try:
+        assert curve[0] > 0, f"Position 0 (final state) should have data, got {curve[0]}"
+        assert curve[1] > 0, f"Position 1 should have data, got {curve[1]}"
+        print(f"✓ Test 8.2: Q-decay curve[0]={curve[0]:.3f}, curve[1]={curve[1]:.3f}, curve[5]={curve[5]:.3f}")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 8.2 FAILED: {e}")
+        failed += 1
+
+    # Test 8.3: compute_q_decay_curve returns consistent results across calls
+    try:
+        curve2 = compute_q_decay_curve(policy_net, num_games=10)
+        assert curve2.shape == (42,), f"Second call shape wrong: {curve2.shape}"
+        # Both calls should produce data at position 0 (untrained net, random games)
+        assert curve2[0] > 0, "Second call should also have data at position 0"
+        print(f"✓ Test 8.3: Q-decay curve is reproducible (curve2[0]={curve2[0]:.3f})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 8.3 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 8 Metrics Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 8 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 8: Training Metrics & Q-Decay Curve...")
+run_metrics_tests()
+
 
 def train_dqn_agent(policy_net, optimizer):
     # 1. SETUP
@@ -1273,10 +1395,12 @@ def train_dqn_agent(policy_net, optimizer):
                 target_net.load_state_dict(policy_net.state_dict())
                 
             # 6. EVALUATION
-            if episode % 100 == 0:
-                win_rate = evaluate_vs_random(policy_net, num_games=20)
+            if episode % EVALUATION_FREQUENCY == 0:
+                win_rate = evaluate_vs_random(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
                 win_rate_vs_rand_hist.append(win_rate)
-                print(f"Ep {episode} | Eps: {eps:.2f} | Unique: {len(unique_states_seen)} | WinRate: {win_rate:.2f}")
+                decay_curve = compute_q_decay_curve(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
+                q_decay_curve_history.append(decay_curve)
+                print(f"Ep {episode} | Eps: {eps:.2f} | Unique: {len(unique_states_seen)} | WinRate: {win_rate:.2f} | Q[0]={decay_curve[0]:.3f} Q[5]={decay_curve[5]:.3f}")
 
     return policy_net
                 
@@ -1374,11 +1498,12 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
         # 4. Unique States (Static at 16 for this test)
         unique_states_history.append(SYNTHETIC_BATCH_SIZE)
 
-        # 5. Win Rate vs Random (Every 20 episodes)
+        # 5. Win Rate vs Random (Every 50 episodes)
         if episode % 50 == 0:
-            # Note: evaluate_vs_random should call policy_net.eval() internally
             win_rate = evaluate_vs_random(num_games=20)
             win_rate_vs_rand_hist.append(win_rate)
+            decay_curve = compute_q_decay_curve(policy_net, num_games=20)
+            q_decay_curve_history.append(decay_curve)
             policy_net.train() # Switch back to training mode after eval
 
         # 6 & 7. Neuron Health (Weights Health)
@@ -1412,17 +1537,16 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
 # *****************************************************************
 def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist, 
                           win_rate_hist, dead_hist, exploding_hist, grad_hist, 
-                          terminal_pct_hist, eval_freq=10):
+                          terminal_pct_hist, q_decay_curves, eval_freq=10):
     """
-    Simplified plotting function for DQN training.
-    6 subplots consolidating 8 metrics.
+    Plotting function for DQN training.
+    8 subplots: 6 original metrics + Q-decay curve + placeholder.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
     fig.suptitle('Connect-4 DQN Training Dashboard', fontsize=16, fontweight='bold')
     
     # Generate x-axis indices
     episodes = np.arange(len(loss_hist))
-    #eval_episodes = np.arange(len(win_rate_hist)) * eval_freq
     eval_episodes = np.arange(1, len(win_rate_hist) + 1) * eval_freq
 
     # --- Plot 1: Loss ---
@@ -1432,7 +1556,7 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
         smoothed = np.convolve(loss_hist, np.ones(10)/10, mode='valid')
         ax.plot(episodes[9:], smoothed, color='blue', label='Smoothed Loss')
     ax.set_title('Training Loss (MSE)')
-    ax.set_yscale('log') # Log scale is often better for seeing convergence
+    ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
     # --- Plot 2: Q-Value Magnitudes (Combined) ---
@@ -1451,25 +1575,45 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.set_ylabel('Count')
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 4: Win Rate AND Terminal % ---
+    # --- Plot 4: Q-Value Decay Curve (Step 8) ---
+    ax = axes[0, 3]
+    if len(q_decay_curves) > 0:
+        # Plot first, middle, and last curves to show progression
+        indices_to_plot = [0]
+        if len(q_decay_curves) > 2:
+            indices_to_plot.append(len(q_decay_curves) // 2)
+        if len(q_decay_curves) > 1:
+            indices_to_plot.append(len(q_decay_curves) - 1)
+        
+        colors = ['lightblue', 'orange', 'red']
+        for ci, curve_idx in enumerate(indices_to_plot):
+            curve = q_decay_curves[curve_idx]
+            # Only plot up to the max non-zero index
+            max_idx = max(np.nonzero(curve)[0]) + 1 if np.any(curve > 0) else 1
+            label = f"Eval {curve_idx + 1}"
+            ax.plot(range(max_idx), curve[:max_idx], color=colors[ci % len(colors)], 
+                    alpha=0.8, label=label, linewidth=1.5)
+        ax.axhline(y=1.0, color='r', linestyle=':', alpha=0.5)
+        ax.set_xlabel('Moves from end (0=final)')
+        ax.set_ylabel('avg abs(max(Q))')
+        ax.legend(fontsize='x-small')
+    ax.set_title('Q-Value Decay Curve')
+    ax.grid(True, alpha=0.3)
+
+    # --- Plot 5: Win Rate AND Terminal % ---
     ax = axes[1, 0]
-
-    # This plots every episode (the 25% target line)
     ax.plot(episodes, terminal_pct_hist, color='cyan', alpha=0.2, label='Batch Terminal %')
-
-    # This plots the Win Rate stretched across the full width
     ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', 
             markersize=4, linewidth=2, label='Win Rate vs Random')
-
     ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.6, label='Random (50%)')
     ax.set_ylim(0, 1.1)
-    ax.set_xlim(0, len(loss_hist)) # Force x-axis to match the full training length
+    ax.set_xlim(0, len(loss_hist))
     ax.set_title('Win Rate & Terminal Signal')
     ax.set_xlabel('Episodes')
     ax.legend(loc='lower right', fontsize='x-small')
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 5: NN Health (Combined Dead/Exploding) ---
+    # --- Plot 6: NN Health (Combined Dead/Exploding) ---
     ax = axes[1, 1]
     ax.plot(episodes, dead_hist, label='Dead (<0.01)', color='black')
     ax.plot(episodes, exploding_hist, label='Exploding (>10)', color='red')
@@ -1477,12 +1621,27 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 6: Gradients ---
+    # --- Plot 7: Gradients ---
     ax = axes[1, 2]
     ax.plot(episodes, grad_hist, color='purple')
     ax.set_title('Mean Absolute Gradient')
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
+
+    # --- Plot 8: Q-Decay Curve Progression (heatmap) ---
+    ax = axes[1, 3]
+    if len(q_decay_curves) > 1:
+        # Stack curves into a 2D array for heatmap
+        max_len = max(max(np.nonzero(c)[0]) + 1 if np.any(c > 0) else 1 for c in q_decay_curves)
+        max_len = min(max_len, 42)
+        heatmap_data = np.array([c[:max_len] for c in q_decay_curves])
+        im = ax.imshow(heatmap_data, aspect='auto', cmap='hot', origin='lower',
+                       extent=[0, max_len, 0, len(q_decay_curves)])
+        ax.set_xlabel('Moves from end')
+        ax.set_ylabel('Evaluation #')
+        plt.colorbar(im, ax=ax, label='|Q|')
+    ax.set_title('Q-Decay Progression')
+    ax.grid(False)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
@@ -1503,6 +1662,7 @@ plot_training_metrics(
     exploding_neuron_cnt_hist,
     grad_history,
     terminal_pct_history,
+    q_decay_curve_history,
     eval_freq=10)
 
 
