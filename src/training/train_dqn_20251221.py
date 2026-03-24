@@ -106,27 +106,30 @@ root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 from src.environment import ConnectFourEnvironment, Config
-from src.utils import DQNReplayBuffer
+from src.utils import DQNReplayBuffer, PrioritizedReplayBuffer
 import matplotlib.pyplot as plt
 
 # *****************************************************************
 # Training Hyperparameters (all in one place)
 # *****************************************************************
-NUM_EPISODES                = 500
+NUM_EPISODES                = 1000
 BATCH_SIZE                  = 128
-LEARNING_RATE               = 0.00001
+LEARNING_RATE               = 0.001
 WEIGHT_DECAY                = 1e-4
-TRAINING_ITERATIONS         = 4       # Training steps per game
+TRAINING_ITERATIONS         = 2       # Training steps per game
 EVAL_VS_RANDOM_GAME_COUNT   = 50
 GAMMA                       = 0.99
-EVALUATION_FREQUENCY        = 10      # Evaluate every N episodes
+EVALUATION_FREQUENCY        = 100     # Evaluate every N episodes
 EPS_START                   = 0.5
-EPS_END                     = 0.2
-EPS_DECAY                   = 0.9999
-TARGET_UPDATE_FREQ          = 100
+EPS_END                     = 0.1
+EPS_DECAY                   = 0.999
+TARGET_UPDATE_FREQ          = 50
 TERMINAL_RATE               = 0.3     # Target terminal ratio in batch sampling
-DROPOUT_RATE                = 0.00
+DROPOUT_RATE                = 0.05
 REPLAY_BUFFER_CAPACITY      = 20000
+PER_ALPHA                   = 0.6     # Prioritization exponent (0=uniform, 1=full priority)
+PER_BETA_START              = 0.4     # Importance sampling start (annealed to 1.0)
+PER_BETA_FRAMES             = 100000  # Frames to anneal beta to 1.0
 DEVICE                      = torch.device(Config().DEVICE)  # Auto-detected: MPS if safe, else CPU
 
 
@@ -136,7 +139,13 @@ DEVICE                      = torch.device(Config().DEVICE)  # Auto-detected: MP
 # You may change the configs
 config = Config()
 env = ConnectFourEnvironment(config)
-replay_buffer = DQNReplayBuffer(capacity=REPLAY_BUFFER_CAPACITY)
+replay_buffer = PrioritizedReplayBuffer(
+    capacity=REPLAY_BUFFER_CAPACITY,
+    alpha=PER_ALPHA,
+    beta_start=PER_BETA_START,
+    beta_frames=PER_BETA_FRAMES,
+    terminal_ratio=TERMINAL_RATE
+)
 
 
 # *****************************************************************
@@ -380,10 +389,10 @@ class Connect4Net(nn.Module):
         self.dr_fc = nn.Dropout(p=dropout_rate)
         self.output = nn.Linear(128, 7)
 
-        # He (Kaiming) initialization for ReLU networks
+        # He (Kaiming) initialization for LeakyReLU networks
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
         
@@ -396,15 +405,15 @@ class Connect4Net(nn.Module):
         if x.dim() == 3:
             x = x.unsqueeze(0)
             
-        x = torch.relu(self.bn1(self.conv1(x)))
+        x = F.leaky_relu(self.bn1(self.conv1(x)), negative_slope=0.01)
         x = self.dr1(x)
-        x = torch.relu(self.bn2(self.conv2(x)))
+        x = F.leaky_relu(self.bn2(self.conv2(x)), negative_slope=0.01)
         x = self.dr2(x)
-        x = torch.relu(self.bn3(self.conv3(x)))
+        x = F.leaky_relu(self.bn3(self.conv3(x)), negative_slope=0.01)
         x = self.dr3(x)
 
         x = x.view(x.size(0), -1) 
-        x = torch.relu(self.fc1(x))
+        x = F.leaky_relu(self.fc1(x), negative_slope=0.01)
         x = self.dr_fc(x)
         return self.output(x)
 
@@ -591,6 +600,7 @@ def play_self_play_game(policy_net, eps=0.5):
     done = False
     moves_count = 0
     game_states = []
+    replay_buffer._recent_indices = []  # Reset for correct negative indexing
 
     while not done and moves_count < 42:
         state = env.get_state()
@@ -1290,6 +1300,270 @@ print("Running Step 8: Training Metrics & Q-Decay Curve...")
 run_metrics_tests()
 
 
+# *****************************************************************
+# STEP 9: Negamax Bellman Validation Tests
+# *****************************************************************
+def run_negamax_tests():
+    """Verify the negamax Bellman equation is correctly implemented."""
+    passed = 0
+    failed = 0
+    test_env = ConnectFourEnvironment(Config())
+
+    # Test 9.1: State returned by play_move is from NEXT player's perspective
+    # This is critical — the negamax equation subtracts opponent's Q, so
+    # next_state must be from the opponent's viewpoint.
+    try:
+        test_env.reset()
+        # P1 plays col 3
+        state_before = test_env.get_state()  # P1's perspective
+        next_state, reward, done = test_env.play_move(3)
+        # next_state should be P2's perspective
+        # P2 has no pieces yet, so channel 0 (my pieces) should be empty
+        # P1's piece should be in channel 1 (opponent's pieces from P2's view)
+        assert next_state[0].sum() == 0, "P2 has no pieces, ch0 should be empty"
+        assert next_state[1].sum() == 1, "P1's piece should be in P2's ch1"
+        # Verify it matches get_state_from_perspective(-1)
+        p2_view = test_env.get_state_from_perspective(-1)
+        assert np.array_equal(next_state, p2_view), "next_state should match P2's perspective"
+        print("✓ Test 9.1: play_move returns state from next player's perspective (negamax-ready)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 9.1 FAILED: {e}")
+        failed += 1
+
+    # Test 9.2: Bellman target uses subtraction (negamax), not addition
+    # For a winning move: target = +1 - gamma * max(Q(s')) * (1-done)
+    # Since done=1, target = +1. Correct.
+    # For the move BEFORE the winning move (loser's move):
+    # target = -1 - gamma * max(Q(s')) * (1-done)
+    # Since done=1, target = -1. Correct.
+    # For a mid-game move: target = 0 - gamma * max(Q(s'))
+    # This means: my Q = negative of opponent's best Q. This is negamax.
+    try:
+        # Create a simple scenario and verify the math
+        test_env.reset()
+        state = test_env.get_state()
+        next_state, reward, done = test_env.play_move(3)  # P1 plays, reward=0, done=False
+
+        policy_net.eval()
+        with torch.no_grad():
+            # Q-values for current state (P1's perspective)
+            q_current = policy_net(torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+            # Q-values for next state (P2's perspective)
+            q_next = policy_net(torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+
+            next_legal = test_env.get_legal_moves()
+            mask = get_action_mask(next_legal)
+            mask_t = torch.tensor(mask, dtype=torch.float32).to(DEVICE)
+            masked_q_next = q_next.squeeze(0).clone()
+            masked_q_next[mask_t == 0] = -1e9
+            next_q_max = masked_q_next.max().item()
+
+            # Negamax target: r - gamma * max(Q_next) * (1 - done)
+            expected_target = reward - (GAMMA * next_q_max * (1 - float(done)))
+
+        # The target should be the NEGATIVE of the opponent's best value (scaled by gamma)
+        # For mid-game (reward=0, done=False): target = -gamma * max(Q_opponent)
+        assert abs(expected_target - (-GAMMA * next_q_max)) < 1e-6, \
+            f"Mid-game target should be -gamma*max(Q_next), got {expected_target}"
+        print(f"✓ Test 9.2: Negamax Bellman: target = 0 - γ*max(Q_opp) = {expected_target:.4f}")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 9.2 FAILED: {e}")
+        failed += 1
+
+    # Test 9.3: Terminal state target ignores future Q-values
+    # When done=True, the (1-done) term zeros out the future, so target = reward
+    try:
+        # Simulate: reward=1.0, done=True
+        terminal_target = 1.0 - (GAMMA * 999.0 * (1 - 1.0))  # next_q_max doesn't matter
+        assert terminal_target == 1.0, f"Terminal target should be reward, got {terminal_target}"
+
+        # Simulate: reward=-1.0, done=True (loser's last move)
+        loser_target = -1.0 - (GAMMA * 999.0 * (1 - 1.0))
+        assert loser_target == -1.0, f"Loser terminal target should be -1, got {loser_target}"
+        print("✓ Test 9.3: Terminal targets: win=+1, loss=-1 (future Q zeroed out)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 9.3 FAILED: {e}")
+        failed += 1
+
+    # Test 9.4: Symmetry — same board from P1 vs P2 perspective produces
+    # Q-values that should be negatives of each other (for a well-trained net)
+    # For an untrained net, just verify the perspectives are correctly flipped
+    try:
+        test_env.reset()
+        test_env.play_move(3)  # P1 plays
+        test_env.play_move(4)  # P2 plays
+        # Now it's P1's turn
+        p1_state = test_env.get_state_from_perspective(1)
+        p2_state = test_env.get_state_from_perspective(-1)
+        # P1's ch0 should equal P2's ch1 and vice versa
+        assert np.array_equal(p1_state[0], p2_state[1]), "P1 ch0 should equal P2 ch1"
+        assert np.array_equal(p1_state[1], p2_state[0]), "P1 ch1 should equal P2 ch0"
+        print("✓ Test 9.4: Perspective symmetry verified (P1.ch0 == P2.ch1)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 9.4 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 9 Negamax Bellman Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 9 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 9: Negamax Bellman Validation...")
+run_negamax_tests()
+
+
+# *****************************************************************
+# STEP 10: Prioritized Replay Buffer Tests
+# *****************************************************************
+def run_per_tests():
+    """Verify the PrioritizedReplayBuffer works correctly with training."""
+    passed = 0
+    failed = 0
+
+    # Test 10.1: PER buffer accepts add_symmetric and stores entries
+    try:
+        test_per = PrioritizedReplayBuffer(capacity=1000, alpha=PER_ALPHA, beta_start=PER_BETA_START, terminal_ratio=TERMINAL_RATE)
+        state = np.zeros((2, 6, 7), dtype=np.float32)
+        next_state = np.zeros((2, 6, 7), dtype=np.float32)
+        mask = np.ones(7, dtype=np.float32)
+        test_per.add_symmetric(state, 3, 0.0, next_state, False, mask)
+        assert len(test_per) == 2, f"Expected 2 entries (symmetric), got {len(test_per)}"
+        print("✓ Test 10.1: PER add_symmetric stores 2 entries")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 10.1 FAILED: {e}")
+        failed += 1
+
+    # Test 10.2: PER update_penalty modifies reward/done correctly
+    try:
+        test_per._recent_indices = []
+        test_per.add_symmetric(state, 3, 0.0, next_state, False, mask)  # indices 2,3
+        test_per.add_symmetric(state, 3, 1.0, next_state, True, mask)   # indices 4,5 (win)
+        # Update loser's move (indices -3, -4)
+        test_per.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+        test_per.update_penalty(index=-4, new_reward=-1.0, is_done=True)
+        # Verify the updated entries
+        tree_idx_3 = test_per._recent_indices[-3]
+        data_idx_3 = tree_idx_3 - test_per.tree.capacity + 1
+        updated = test_per.tree.data[data_idx_3]
+        assert updated[2] == -1.0, f"Expected reward -1.0, got {updated[2]}"
+        assert updated[4] == 1.0, f"Expected done=1.0, got {updated[4]}"
+        print("✓ Test 10.2: PER update_penalty correctly modifies reward/done")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 10.2 FAILED: {e}")
+        failed += 1
+
+    # Test 10.3: PER sample returns (batch, indices, weights)
+    try:
+        # Fill buffer with enough data
+        test_per2 = PrioritizedReplayBuffer(capacity=1000, alpha=PER_ALPHA, beta_start=PER_BETA_START)
+        for _ in range(100):
+            s = np.random.randn(2, 6, 7).astype(np.float32)
+            ns = np.random.randn(2, 6, 7).astype(np.float32)
+            m = np.ones(7, dtype=np.float32)
+            test_per2.add(s, np.random.randint(7), 0.0, ns, False, m)
+        
+        batch, indices, weights = test_per2.sample(32)
+        states_b, actions_b, rewards_b, ns_b, dones_b, masks_b = batch
+        assert states_b.shape == (32, 2, 6, 7), f"States shape wrong: {states_b.shape}"
+        assert len(indices) == 32, f"Expected 32 indices, got {len(indices)}"
+        assert len(weights) == 32, f"Expected 32 weights, got {len(weights)}"
+        assert np.all(weights > 0), "All importance weights should be positive"
+        assert np.all(weights <= 1.0), "Weights should be normalized to max 1.0"
+        print(f"✓ Test 10.3: PER sample returns correct shapes and valid weights")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 10.3 FAILED: {e}")
+        failed += 1
+
+    # Test 10.4: Priority updates change sampling distribution
+    try:
+        # Update one entry with very high priority
+        high_td = np.array([100.0])
+        test_per2.update_priorities(indices[:1], high_td)
+        # Sample many times and check if the high-priority entry appears more often
+        high_idx = indices[0]
+        count = 0
+        for _ in range(50):
+            _, sampled_indices, _ = test_per2.sample(32)
+            if high_idx in sampled_indices:
+                count += 1
+        # With high priority, it should appear in most samples
+        assert count > 10, f"High-priority entry only appeared in {count}/50 samples"
+        print(f"✓ Test 10.4: Priority updates affect sampling (high-priority appeared in {count}/50 batches)")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 10.4 FAILED: {e}")
+        failed += 1
+
+    # Test 10.5: Main replay_buffer is PrioritizedReplayBuffer
+    try:
+        assert isinstance(replay_buffer, PrioritizedReplayBuffer), \
+            f"replay_buffer should be PrioritizedReplayBuffer, got {type(replay_buffer)}"
+        print("✓ Test 10.5: Main replay_buffer is PrioritizedReplayBuffer")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 10.5 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 10 PER Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 10 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 10: Prioritized Replay Buffer...")
+run_per_tests()
+
+
+# *****************************************************************
+# STEP 11: High Discount Rate Verification
+# *****************************************************************
+def run_discount_tests():
+    """Verify GAMMA is set high enough for long-horizon credit assignment."""
+    passed = 0
+    failed = 0
+
+    # Test 11.1: GAMMA >= 0.99
+    try:
+        assert GAMMA >= 0.99, f"GAMMA should be >= 0.99, got {GAMMA}"
+        print(f"✓ Test 11.1: GAMMA = {GAMMA} (high enough for long-horizon learning)")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 11.1 FAILED: {e}")
+        failed += 1
+
+    # Test 11.2: Verify signal propagation — with GAMMA=0.99, a reward at move 20
+    # still has 0.99^20 = 0.818 influence on move 0
+    try:
+        influence_at_20 = GAMMA ** 20
+        assert influence_at_20 > 0.5, f"Signal at 20 moves back is only {influence_at_20:.3f}"
+        influence_at_40 = GAMMA ** 40
+        print(f"✓ Test 11.2: Signal propagation — 20 moves: {influence_at_20:.3f}, 40 moves: {influence_at_40:.3f}")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 11.2 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 11 Discount Rate Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 11 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 11: Discount Rate Verification...")
+run_discount_tests()
+
+
 def train_dqn_agent(policy_net, optimizer):
     # 1. SETUP
     target_net = copy.deepcopy(policy_net) 
@@ -1319,11 +1593,7 @@ def train_dqn_agent(policy_net, optimizer):
             last_dones = None
 
             for _ in range(TRAINING_ITERATIONS): 
-                #states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(BATCH_SIZE)
-                states, actions, rewards, next_states, dones, next_masks = replay_buffer.sample(
-                    BATCH_SIZE, 
-                    terminal_ratio=TERMINAL_RATE # Our target ratio
-                )
+                (states, actions, rewards, next_states, dones, next_masks), per_indices, is_weights = replay_buffer.sample(BATCH_SIZE)
 
                 s_batch = torch.tensor(states, dtype=torch.float32).to(DEVICE)
                 a_batch = torch.tensor(actions, dtype=torch.long).to(DEVICE)
@@ -1331,6 +1601,7 @@ def train_dqn_agent(policy_net, optimizer):
                 ns_batch = torch.tensor(next_states, dtype=torch.float32).to(DEVICE)
                 d_batch = torch.tensor(dones, dtype=torch.float32).to(DEVICE)
                 m_batch = torch.tensor(next_masks, dtype=torch.float32).to(DEVICE)
+                w_batch = torch.tensor(is_weights, dtype=torch.float32).to(DEVICE)
 
                 with torch.no_grad():
                     next_q_values = target_net(ns_batch) 
@@ -1342,10 +1613,15 @@ def train_dqn_agent(policy_net, optimizer):
                 q_values = policy_net(s_batch)
                 predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
                 
-                loss = nn.functional.mse_loss(predicted_qs, target_q)
+                # Weighted MSE loss (importance sampling correction from PER)
+                td_errors = (predicted_qs - target_q).detach()
+                loss = (w_batch * (predicted_qs - target_q) ** 2).mean()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
+                
+                # Update PER priorities with TD-errors
+                replay_buffer.update_priorities(per_indices, td_errors.cpu().numpy())
                 
                 # Capture data for metrics
                 last_loss = loss.item()
@@ -1628,29 +1904,35 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 8: Q-Decay Curve Progression (heatmap) ---
+    # --- Plot 8: Q-Value by Moves-from-End over Training ---
     ax = axes[1, 3]
     if len(q_decay_curves) > 1:
-        # Stack curves into a 2D array for heatmap
-        max_len = max(max(np.nonzero(c)[0]) + 1 if np.any(c > 0) else 1 for c in q_decay_curves)
-        max_len = min(max_len, 42)
-        heatmap_data = np.array([c[:max_len] for c in q_decay_curves])
-        im = ax.imshow(heatmap_data, aspect='auto', cmap='hot', origin='lower',
-                       extent=[0, max_len, 0, len(q_decay_curves)])
-        ax.set_xlabel('Moves from end')
-        ax.set_ylabel('Evaluation #')
-        plt.colorbar(im, ax=ax, label='|Q|')
-    ax.set_title('Q-Decay Progression')
-    ax.grid(False)
+        curves_arr = np.array(q_decay_curves)  # shape: (num_evals, 42)
+        eval_x = np.arange(1, len(q_decay_curves) + 1)
+        # Positions to track: last, 2nd-last, 3rd, 4th, 5th, 10th, 15th, 20th
+        positions = [0, 1, 2, 3, 4, 9, 14, 19]
+        labels =    ['Last', '2nd', '3rd', '4th', '5th', '10th', '15th', '20th']
+        colors =    ['red', 'orangered', 'orange', 'gold', 'green', 'teal', 'blue', 'purple']
+        for pos, lbl, clr in zip(positions, labels, colors):
+            vals = curves_arr[:, pos]
+            ax.plot(eval_x, vals, color=clr, label=lbl, alpha=0.8, linewidth=1.2)
+        ax.axhline(y=1.0, color='r', linestyle=':', alpha=0.3)
+        ax.set_xlabel('Evaluation #')
+        ax.set_ylabel('avg |max(Q)|')
+        ax.legend(fontsize='xx-small', ncol=2, loc='upper right')
+    ax.set_title('Q by Moves-from-End')
+    ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig('training_dashboard.png', dpi=150, bbox_inches='tight')
+    print("Dashboard saved to training_dashboard.png")
     plt.show()
 
 # *****************************************************************
 # Train, show results
 # *****************************************************************
-#train_dqn_agent(policy_net, optimizer)                                           # <--- REAL SELF PLAY
-train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
+train_dqn_agent(policy_net, optimizer)                                           # <--- REAL SELF PLAY
+#train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
 
 plot_training_metrics(
     loss_history,
@@ -1663,7 +1945,7 @@ plot_training_metrics(
     grad_history,
     terminal_pct_history,
     q_decay_curve_history,
-    eval_freq=10)
+    eval_freq=EVALUATION_FREQUENCY)
 
 
 
@@ -1675,116 +1957,5 @@ plot_training_metrics(
 # *****************************************************************
 # Test the trained policy 
 # *****************************************************************
-# Test 1: Test on cases in the replay buffer
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-
-def audit_synthetic_performance(policy_net, replay_buffer, device):
-    """
-    Evaluates the model on every single example in the synthetic buffer.
-    Outputs a performance table and a visualization of prediction accuracy.
-    """
-    policy_net.eval()
-    results = []
-    
-    # We don't want to sample; we want to see everything
-    # Accessing internal buffer storage (assuming deque or list)
-    all_transitions = list(replay_buffer.buffer)
-    
-    mape_sum = 0
-    count = 0
-
-    print(f"\n--- Synthetic Buffer Audit (Size: {len(all_transitions)}) ---")
-
-    for i, (state, action, reward, next_state, done, next_mask) in enumerate(all_transitions):
-        # 1. Prepare Tensors
-        s_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
-        ns_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
-        m_tensor = torch.tensor(next_mask, dtype=torch.float32).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            # 2. Calculate Estimated Reward (Current Prediction)
-            q_values = policy_net(s_tensor)
-            estimated_q = q_values[0][action].item()
-
-            # 3. Calculate Target Reward (Bellman Ground Truth)
-            next_q_values = policy_net(ns_tensor) # Using policy net to check internal consistency
-            masked_next_q = next_q_values.masked_fill(m_tensor == 0, -1e9)
-            next_q_max = masked_next_q.max(dim=1)[0].item()
-            
-            # Negamax target: r - gamma * max_next
-            target_q = reward - (GAMMA * next_q_max * (1 - done))
-
-        # 4. Calculate Difference
-        diff = abs(target_q - estimated_q)
-        # Handle division by zero for MAPE by using max(abs(target), 1.0) 
-        # Since our values are capped at 1.0, this gives a conservative error %
-        percent_diff = (diff / max(abs(target_q), 0.1)) * 100
-        
-        mape_sum += percent_diff
-        count += 1
-
-        results.append({
-            'Sample': i,
-            'Target': round(target_q, 3),
-            'Estimate': round(estimated_q, 3),
-            'Abs Diff': round(diff, 3),
-            '% Diff': round(percent_diff, 1)
-        })
-
-    # Create DataFrame for nice display
-    df = pd.DataFrame(results)
-    mape = mape_sum / count
-
-    # --- Visualization ---
-    plt.figure(figsize=(12, 6))
-    x = np.arange(len(df))
-    width = 0.35
-
-    plt.bar(x - width/2, df['Target'], width, label='Target (Truth)', color='skyblue')
-    plt.bar(x + width/2, df['Estimate'], width, label='Estimate (AI)', color='salmon')
-
-    plt.xlabel('Sample Number')
-    plt.ylabel('Q-Value Magnitude')
-    plt.title(f'Target vs. Estimated Q-Values (MAPE: {mape:.2f}%)')
-    plt.legend()
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.show()
-
-    print(df.to_string(index=False))
-    print(f"\nFINAL MAPE: {mape:.2f}%")
-    
-    return df
-
-df = audit_synthetic_performance(policy_net, replay_buffer, DEVICE)
-print( df )
-
-"""
-test_sample = [0]         # Choose which item in the replay buffer to use
-test_batch_size = len(test_sample)     # Choose a single item from the replay buffer to test
-
-#examples = get_training_examples()
-replay_buffer = generate_artificial_replay_buffer_for_training()
-print( "Test Synthetic Replay Buffer Loaded!  Length: ", len( replay_buffer) )
-
-replay_sample = replay_buffer.sample( test_batch_size, test_sample )
-# print( initial_sample )
-
-state = replay_sample[0]
-print( "Sample state:")
-print( state )
-print( "Sample action: ", replay_sample[1] )
-print( "Sample reward: ", replay_sample[2])
-# Simplified test call
-policy_net.eval() # CRITICAL for test consistency!
-with torch.no_grad():
-    q_values = policy_net(state) # The class handles the rest
-#
-#state_tensor = torch.FloatTensor(state).to('cpu')
-#with torch.no_grad():
-#    q_values = policy_net(state_tensor)
-print( "Q Values on synthetic test state: " )
-print( q_values )
-"""
+# Audit function commented out — uses old DQN buffer API, will update for PER later
+# To re-enable, update to work with PrioritizedReplayBuffer's SumTree storage

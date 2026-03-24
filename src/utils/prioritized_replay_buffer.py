@@ -182,14 +182,16 @@ class SumTree:
 
 class PrioritizedReplayBuffer:
     """
-    Prioritized Experience Replay Buffer for DQN.
+    Prioritized Experience Replay Buffer for DQN with terminal-ratio guarantee.
     
     Samples experiences based on their TD-error (priority), allowing the agent
-    to learn more from important/surprising transitions.
+    to learn more from important/surprising transitions. Includes a terminal-ratio
+    guarantee to prevent catastrophic forgetting of terminal state values.
     
     Key Parameters:
         alpha: How much prioritization to use (0 = uniform, 1 = full priority)
         beta: Importance sampling correction (0 = no correction, 1 = full correction)
+        terminal_ratio: Guaranteed fraction of terminal states in each batch
         
     Attributes:
         capacity: Maximum number of experiences
@@ -199,6 +201,7 @@ class PrioritizedReplayBuffer:
         epsilon: Small constant to ensure non-zero priorities
         tree: Sum tree for efficient sampling
         max_priority: Track maximum priority for new experiences
+        terminal_indices: Set of tree indices that are terminal states
     """
     
     def __init__(
@@ -207,7 +210,8 @@ class PrioritizedReplayBuffer:
         alpha: float = 0.6,
         beta_start: float = 0.4,
         beta_frames: int = 100000,
-        epsilon: float = 1e-6
+        epsilon: float = 1e-6,
+        terminal_ratio: float = 0.3
     ):
         """
         Initialize prioritized replay buffer.
@@ -215,23 +219,29 @@ class PrioritizedReplayBuffer:
         Args:
             capacity: Maximum number of experiences to store
             alpha: Prioritization exponent (0 = uniform, 1 = full priority)
-                   Typical: 0.6-0.7
             beta_start: Initial importance sampling exponent (0 = no correction)
-                       Typical: 0.4, annealed to 1.0
             beta_frames: Number of frames to anneal beta to 1.0
             epsilon: Small constant added to priorities to ensure non-zero
+            terminal_ratio: Guaranteed fraction of terminal states per batch
         """
         self.capacity = capacity
         self.alpha = alpha
         self.beta = beta_start
         self.beta_increment = (1.0 - beta_start) / beta_frames
         self.epsilon = epsilon
+        self.terminal_ratio = terminal_ratio
         
         # Sum tree for efficient sampling
         self.tree = SumTree(capacity)
         
         # Track maximum priority for new experiences
         self.max_priority = 1.0
+        
+        # Track recent tree indices for update_penalty support
+        self._recent_indices = []
+        
+        # Track terminal state indices for guaranteed terminal sampling
+        self._terminal_indices = []
     
     def add(
         self,
@@ -239,39 +249,84 @@ class PrioritizedReplayBuffer:
         action: int,
         reward: float,
         next_state: np.ndarray,
-        done: bool
+        done: bool,
+        next_mask: np.ndarray = None
     ) -> None:
         """
         Add experience with maximum priority.
         
         New experiences get max priority to ensure they're sampled at least once.
+        Terminal states are tracked separately for guaranteed sampling.
         
         Args:
-            state: Current state, shape (3, 6, 7)
+            state: Current state, shape (2, 6, 7)
             action: Action taken (0-6)
             reward: Reward received
-            next_state: Next state, shape (3, 6, 7)
+            next_state: Next state, shape (2, 6, 7)
             done: Whether episode ended
+            next_mask: Legal move mask for next state, shape (7,)
         """
-        experience = (state, action, reward, next_state, done)
+        experience = (state, action, reward, next_state, done, next_mask)
+        
+        # Track the write index for update_penalty support
+        tree_idx = self.tree.write_idx + self.tree.capacity - 1
+        self._recent_indices.append(tree_idx)
+        
+        # Track terminal states for guaranteed sampling
+        if done:
+            self._terminal_indices.append(tree_idx)
         
         # New experiences get max priority
         priority = self.max_priority
         self.tree.add(priority, experience)
+
+    def add_symmetric(self, state, action, reward, next_state, done, next_mask):
+        """Add original and horizontally mirrored version."""
+        self.add(state, action, reward, next_state, done, next_mask)
+        
+        state_m = np.flip(state, axis=-1).copy()
+        next_state_m = np.flip(next_state, axis=-1).copy()
+        action_m = 6 - action
+        next_mask_m = np.flip(next_mask).copy()
+        self.add(state_m, action_m, reward, next_state_m, done, next_mask_m)
+
+    def update_penalty(self, index, new_reward, is_done):
+        """
+        Update reward/done for a recently added entry (supports negative indexing).
+        Used for Bellman negative reward fix on loser's last move.
+        """
+        if abs(index) > len(self._recent_indices):
+            return
+        tree_idx = self._recent_indices[index]
+        data_idx = tree_idx - self.tree.capacity + 1
+        old_exp = self.tree.data[data_idx]
+        if old_exp is None or old_exp == 0:
+            return
+        new_exp = (old_exp[0], old_exp[1], float(new_reward), old_exp[3], float(is_done), old_exp[5])
+        self.tree.data[data_idx] = new_exp
+        # Boost priority for terminal states
+        self.tree.update(tree_idx, self.max_priority)
+        # Track as terminal if marked done
+        if is_done and tree_idx not in self._terminal_indices:
+            self._terminal_indices.append(tree_idx)
     
     def sample(self, batch_size: int) -> Tuple[Tuple, np.ndarray, np.ndarray]:
         """
-        Sample batch of experiences based on priorities.
+        Sample batch with guaranteed terminal-ratio.
         
-        Returns experiences, their indices (for priority updates), and
-        importance sampling weights (to correct bias).
+        Splits the batch into two parts:
+        1. terminal_ratio fraction: uniformly sampled from terminal states
+        2. remaining fraction: PER-sampled from the full buffer
+        
+        This prevents catastrophic forgetting of terminal Q-values, which
+        happens when PER reduces terminal priorities after they're learned.
         
         Args:
             batch_size: Number of experiences to sample
         
         Returns:
             Tuple of:
-            - batch: (states, actions, rewards, next_states, dones)
+            - batch: (states, actions, rewards, next_states, dones, next_masks)
             - indices: Tree indices for priority updates
             - weights: Importance sampling weights
         """
@@ -281,31 +336,61 @@ class PrioritizedReplayBuffer:
                 f"{self.tree.n_entries} experiences."
             )
         
-        # Arrays to store batch
+        # Clean up terminal indices: remove any that have been overwritten
+        valid_terminal_indices = []
+        for tidx in self._terminal_indices:
+            data_idx = tidx - self.tree.capacity + 1
+            if 0 <= data_idx < self.capacity:
+                exp = self.tree.data[data_idx]
+                if exp is not None and exp != 0 and exp[4]:  # done == True
+                    valid_terminal_indices.append(tidx)
+        self._terminal_indices = valid_terminal_indices
+        
+        # Determine terminal vs PER split
+        n_terminal = 0
+        if len(self._terminal_indices) > 0:
+            n_terminal = min(
+                int(batch_size * self.terminal_ratio),
+                len(self._terminal_indices)
+            )
+        n_per = batch_size - n_terminal
+        
         batch = []
         indices = np.zeros(batch_size, dtype=np.int32)
         priorities = np.zeros(batch_size, dtype=np.float32)
         
-        # Divide priority range into segments
-        segment = self.tree.total() / batch_size
+        # Part 1: Sample terminal states uniformly
+        if n_terminal > 0:
+            terminal_sample_indices = np.random.choice(
+                len(self._terminal_indices), size=n_terminal, replace=True
+            )
+            for i, ti in enumerate(terminal_sample_indices):
+                tree_idx = self._terminal_indices[ti]
+                data_idx = tree_idx - self.tree.capacity + 1
+                data = self.tree.data[data_idx]
+                priority = self.tree.tree[tree_idx]
+                batch.append(data)
+                indices[i] = tree_idx
+                priorities[i] = max(priority, self.epsilon)
         
-        # Sample one experience from each segment
-        for i in range(batch_size):
-            # Random value in this segment
-            a = segment * i
-            b = segment * (i + 1)
-            s = np.random.uniform(a, b)
-            
-            # Get experience for this sum
-            idx, priority, data = self.tree.get(s)
-            
-            batch.append(data)
-            indices[i] = idx
-            priorities[i] = priority
+        # Part 2: PER-sample the rest from the full buffer
+        if n_per > 0:
+            segment = self.tree.total() / n_per
+            for i in range(n_per):
+                a = segment * i
+                b = segment * (i + 1)
+                s = np.random.uniform(a, b)
+                idx, priority, data = self.tree.get(s)
+                batch.append(data)
+                indices[n_terminal + i] = idx
+                priorities[n_terminal + i] = max(priority, self.epsilon)
         
         # Compute importance sampling weights
         # w_i = (N * P(i))^(-beta) / max_w
-        sampling_probabilities = priorities / self.tree.total()
+        total = max(self.tree.total(), self.epsilon)
+        sampling_probabilities = priorities / total
+        # Clamp to avoid numerical issues
+        sampling_probabilities = np.clip(sampling_probabilities, self.epsilon, 1.0)
         weights = np.power(self.tree.n_entries * sampling_probabilities, -self.beta)
         weights /= weights.max()  # Normalize by max weight
         
@@ -313,7 +398,7 @@ class PrioritizedReplayBuffer:
         self.beta = min(1.0, self.beta + self.beta_increment)
         
         # Unzip batch
-        states, actions, rewards, next_states, dones = zip(*batch)
+        states, actions, rewards, next_states, dones, next_masks = zip(*batch)
         
         # Convert to numpy arrays
         states = np.array(states, dtype=np.float32)
@@ -321,14 +406,16 @@ class PrioritizedReplayBuffer:
         rewards = np.array(rewards, dtype=np.float32)
         next_states = np.array(next_states, dtype=np.float32)
         dones = np.array(dones, dtype=np.float32)
+        next_masks = np.array(next_masks, dtype=np.float32)
         
-        return (states, actions, rewards, next_states, dones), indices, weights
+        return (states, actions, rewards, next_states, dones, next_masks), indices, weights
     
     def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray) -> None:
         """
         Update priorities based on TD-errors.
         
         Priority = (|TD-error| + epsilon)^alpha
+        Terminal states get a minimum priority floor to prevent forgetting.
         
         Args:
             indices: Tree indices from sample()
@@ -337,6 +424,14 @@ class PrioritizedReplayBuffer:
         for idx, td_error in zip(indices, td_errors):
             # Priority = (|TD-error| + epsilon)^alpha
             priority = (abs(td_error) + self.epsilon) ** self.alpha
+            
+            # Terminal states get a minimum priority floor (at least 50% of max)
+            # This prevents the "learn then forget" cycle
+            data_idx = idx - self.tree.capacity + 1
+            if 0 <= data_idx < self.capacity:
+                exp = self.tree.data[data_idx]
+                if exp is not None and exp != 0 and exp[4]:  # done == True
+                    priority = max(priority, self.max_priority * 0.5)
             
             # Update max priority
             self.max_priority = max(self.max_priority, priority)
@@ -360,7 +455,9 @@ class PrioritizedReplayBuffer:
             'utilization': self.tree.n_entries / self.capacity,
             'is_full': self.tree.n_entries == self.capacity,
             'max_priority': self.max_priority,
-            'beta': self.beta
+            'beta': self.beta,
+            'terminal_count': len(self._terminal_indices),
+            'terminal_ratio': self.terminal_ratio
         }
     
     def __repr__(self) -> str:

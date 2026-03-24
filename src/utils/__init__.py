@@ -5,5 +5,6 @@ This module contains helper utilities used across different agents.
 """
 
 from .dqn_replay_buffer import DQNReplayBuffer
+from .prioritized_replay_buffer import PrioritizedReplayBuffer
 
-__all__ = ['DQNReplayBuffer']
+__all__ = ['DQNReplayBuffer', 'PrioritizedReplayBuffer']
