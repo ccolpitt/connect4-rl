@@ -102,6 +102,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from collections import deque
+from datetime import datetime
 root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
@@ -131,6 +132,14 @@ PER_ALPHA                   = 0.6     # Prioritization exponent (0=uniform, 1=fu
 PER_BETA_START              = 0.4     # Importance sampling start (annealed to 1.0)
 PER_BETA_FRAMES             = 100000  # Frames to anneal beta to 1.0
 DEVICE                      = torch.device(Config().DEVICE)  # Auto-detected: MPS if safe, else CPU
+
+# Champion/Challenger (Step 12)
+CHAMPION_EVAL_FREQUENCY     = 200     # Evaluate challenger vs champion every N episodes
+CHAMPION_EVAL_GAMES         = 50      # Games per evaluation
+CHAMPION_THRESHOLD          = 0.55    # Win rate to promote challenger
+CHAMPION_EVAL_TEMPERATURE   = 0.3     # Softmax temperature for evaluation games
+MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N episodes
+CHAMPION_DIR                = os.path.join(root_dir, "models")
 
 
 # *****************************************************************
@@ -590,6 +599,163 @@ def select_action(policy_net, state, legal_moves, eps) -> int:
         best_action = torch.argmax(masked_q).item()
     
     return int(best_action)
+
+
+def select_action_temperature(policy_net, state, legal_moves, temperature=0.3) -> int:
+    """Select action using softmax over Q-values with temperature scaling.
+    
+    Lower temperature → more greedy (deterministic).
+    Higher temperature → more random (exploratory).
+    temperature=0 → pure greedy (argmax).
+    """
+    if temperature <= 0:
+        return select_action(policy_net, state, legal_moves, eps=0.0)
+    
+    policy_net.eval()
+    with torch.no_grad():
+        q_values = policy_net(state).squeeze(0)
+        # Mask illegal moves
+        mask = torch.full((7,), -1e9)
+        for m in legal_moves:
+            mask[m] = 0.0
+        masked_q = q_values + mask.to(q_values.device)
+        # Softmax with temperature
+        probs = torch.softmax(masked_q / temperature, dim=0).cpu().numpy()
+        action = np.random.choice(7, p=probs)
+    return int(action)
+
+
+def play_champion_challenger_game(challenger_net, champion_net, eps, challenger_is_p1=True):
+    """Play a single game: challenger (eps-greedy) vs champion (greedy).
+    
+    Returns game_states for the challenger's moves only (for unique state tracking).
+    Both players' moves go into the replay buffer.
+    """
+    env.reset()
+    done = False
+    moves_count = 0
+    game_states = []
+    replay_buffer._recent_indices = []
+    reward = 0.0
+
+    while not done and moves_count < 42:
+        state = env.get_state()
+        legal_moves = env.get_legal_moves()
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+        
+        # Determine whose turn it is
+        is_p1_turn = (moves_count % 2 == 0)
+        is_challenger_turn = (is_p1_turn == challenger_is_p1)
+        
+        if is_challenger_turn:
+            game_states.append(state)
+            action = select_action(challenger_net, state_tensor, legal_moves, eps)
+        else:
+            # Champion always plays greedy
+            action = select_action(champion_net, state_tensor, legal_moves, eps=0.0)
+        
+        next_state, reward, done = env.play_move(action)
+        
+        if not done:
+            next_legal_moves = env.get_legal_moves()
+            next_mask = get_action_mask(next_legal_moves)
+        else:
+            next_mask = np.zeros(7, dtype=np.float32)
+
+        replay_buffer.add_symmetric(state, action, reward, next_state, done, next_mask)
+        moves_count += 1
+    
+    # Bellman negative reward fix: loser's last move gets -1
+    if reward == 1.0:
+        replay_buffer.update_penalty(index=-3, new_reward=-1.0, is_done=True)
+        replay_buffer.update_penalty(index=-4, new_reward=-1.0, is_done=True)
+    
+    # Determine if challenger won
+    # The player who made the last move won (if reward == 1.0)
+    last_move_was_p1 = ((moves_count - 1) % 2 == 0)
+    challenger_made_last_move = (last_move_was_p1 == challenger_is_p1)
+    
+    if reward == 1.0 and challenger_made_last_move:
+        challenger_result = 1  # win
+    elif reward == 1.0 and not challenger_made_last_move:
+        challenger_result = -1  # loss
+    else:
+        challenger_result = 0  # draw
+    
+    return game_states, challenger_result
+
+
+def evaluate_challenger_vs_champion(challenger_net, champion_net, num_games=50, temperature=0.3):
+    """Evaluate challenger vs champion using temperature-based move selection.
+    
+    Returns challenger win rate. Both players use temperature-based selection
+    to introduce stochasticity for meaningful evaluation over many games.
+    """
+    eval_env = ConnectFourEnvironment(Config())
+    challenger_wins = 0
+    champion_wins = 0
+    
+    for game_idx in range(num_games):
+        eval_env.reset()
+        done = False
+        moves_count = 0
+        challenger_is_p1 = (game_idx % 2 == 0)  # Alternate sides
+        reward = 0.0
+        
+        while not done and moves_count < 42:
+            state = eval_env.get_state()
+            legal = eval_env.get_legal_moves()
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            
+            is_p1_turn = (moves_count % 2 == 0)
+            is_challenger_turn = (is_p1_turn == challenger_is_p1)
+            
+            if is_challenger_turn:
+                action = select_action_temperature(challenger_net, state_tensor, legal, temperature)
+            else:
+                action = select_action_temperature(champion_net, state_tensor, legal, temperature)
+            
+            _, reward, done = eval_env.play_move(action)
+            moves_count += 1
+        
+        if reward == 1.0:
+            last_move_was_p1 = ((moves_count - 1) % 2 == 0)
+            challenger_made_last_move = (last_move_was_p1 == challenger_is_p1)
+            if challenger_made_last_move:
+                challenger_wins += 1
+            else:
+                champion_wins += 1
+    
+    win_rate = challenger_wins / num_games if num_games > 0 else 0.0
+    return win_rate, challenger_wins, champion_wins
+
+
+def save_champion(policy_net, version, episode, win_rate_vs_champion):
+    """Save a promoted champion to the models directory."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"champion_v{version}_{timestamp}.pth"
+    filepath = os.path.join(CHAMPION_DIR, filename)
+    
+    torch.save({
+        'model_state_dict': policy_net.state_dict(),
+        'version': version,
+        'episode': episode,
+        'win_rate_vs_champion': win_rate_vs_champion,
+        'timestamp': timestamp,
+    }, filepath)
+    
+    # Also save as current champion
+    current_path = os.path.join(CHAMPION_DIR, "champion_current.pth")
+    torch.save({
+        'model_state_dict': policy_net.state_dict(),
+        'version': version,
+        'episode': episode,
+        'win_rate_vs_champion': win_rate_vs_champion,
+        'timestamp': timestamp,
+    }, current_path)
+    
+    print(f"  Champion v{version} saved → {filename}")
+    return filepath
     
 
 # *****************************************************************
@@ -1564,16 +1730,131 @@ print("Running Step 11: Discount Rate Verification...")
 run_discount_tests()
 
 
+# *****************************************************************
+# STEP 12: Champion/Challenger Infrastructure Tests
+# *****************************************************************
+def run_champion_challenger_tests():
+    """Validate champion/challenger mechanics before training."""
+    passed = 0
+    failed = 0
+
+    # Test 12.1: Temperature-based action selection produces valid moves
+    try:
+        test_env = ConnectFourEnvironment(Config())
+        test_env.reset()
+        state = test_env.get_state()
+        legal = test_env.get_legal_moves()
+        state_t = torch.tensor(state, dtype=torch.float32)
+        
+        actions_seen = set()
+        for _ in range(50):
+            a = select_action_temperature(policy_net, state_t, legal, temperature=0.3)
+            assert a in legal, f"Temperature selection returned illegal move {a}"
+            actions_seen.add(a)
+        # With temperature > 0, we should see some variety
+        assert len(actions_seen) > 1, f"Temperature selection produced only 1 unique action out of 50"
+        print(f"✓ Test 12.1: Temperature selection produces valid, diverse moves ({len(actions_seen)} unique actions)")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 12.1 FAILED: {e}")
+        failed += 1
+
+    # Test 12.2: Temperature=0 is equivalent to greedy
+    try:
+        greedy_action = select_action(policy_net, state_t, legal, eps=0.0)
+        temp0_actions = [select_action_temperature(policy_net, state_t, legal, temperature=0.0) for _ in range(10)]
+        assert all(a == greedy_action for a in temp0_actions), "Temperature=0 should be deterministic greedy"
+        print(f"✓ Test 12.2: Temperature=0 matches greedy (action={greedy_action})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 12.2 FAILED: {e}")
+        failed += 1
+
+    # Test 12.3: Champion/challenger game completes and returns valid result
+    try:
+        champion_test = copy.deepcopy(policy_net)
+        champion_test.eval()
+        _, result = play_champion_challenger_game(policy_net, champion_test, eps=0.5, challenger_is_p1=True)
+        assert result in [-1, 0, 1], f"Invalid game result: {result}"
+        print(f"✓ Test 12.3: Champion/challenger game completed (result={result})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 12.3 FAILED: {e}")
+        failed += 1
+
+    # Test 12.4: Evaluation function returns valid win rate
+    try:
+        wr, c_wins, ch_wins = evaluate_challenger_vs_champion(
+            policy_net, champion_test, num_games=10, temperature=0.3
+        )
+        assert 0.0 <= wr <= 1.0, f"Win rate out of range: {wr}"
+        assert c_wins + ch_wins <= 10, f"More results than games: {c_wins}W + {ch_wins}L > 10"
+        print(f"✓ Test 12.4: Evaluation works (wr={wr:.2f}, {c_wins}W/{ch_wins}L/{10-c_wins-ch_wins}D)")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 12.4 FAILED: {e}")
+        failed += 1
+
+    # Test 12.5: Save champion creates file
+    try:
+        test_path = save_champion(policy_net, version=999, episode=0, win_rate_vs_champion=0.0)
+        assert os.path.exists(test_path), f"Champion file not created: {test_path}"
+        # Clean up test file
+        os.remove(test_path)
+        current_path = os.path.join(CHAMPION_DIR, "champion_current.pth")
+        assert os.path.exists(current_path), "champion_current.pth not created"
+        print(f"✓ Test 12.5: save_champion creates file successfully")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 12.5 FAILED: {e}")
+        failed += 1
+
+    # Test 12.6: Hyperparameters are set correctly
+    try:
+        assert CHAMPION_THRESHOLD == 0.55, f"CHAMPION_THRESHOLD should be 0.55, got {CHAMPION_THRESHOLD}"
+        assert CHAMPION_EVAL_FREQUENCY == 200, f"CHAMPION_EVAL_FREQUENCY should be 200, got {CHAMPION_EVAL_FREQUENCY}"
+        assert MAX_STAGNATION_EPISODES == 1000, f"MAX_STAGNATION should be 1000, got {MAX_STAGNATION_EPISODES}"
+        print(f"✓ Test 12.6: Champion hyperparameters set correctly (threshold={CHAMPION_THRESHOLD}, eval_freq={CHAMPION_EVAL_FREQUENCY}, stagnation={MAX_STAGNATION_EPISODES})")
+        passed += 1
+    except AssertionError as e:
+        print(f"✗ Test 12.6 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 12 Champion/Challenger Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 12 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 12: Champion/Challenger Infrastructure...")
+run_champion_challenger_tests()
+
+
 def train_dqn_agent(policy_net, optimizer):
     # 1. SETUP
     target_net = copy.deepcopy(policy_net) 
     target_net.eval()
     
+    # Champion/Challenger setup
+    champion_net = copy.deepcopy(policy_net)
+    champion_net.eval()
+    champion_version = 0
+    episodes_since_promotion = 0
+    champion_history = []  # Track promotions: (version, episode, win_rate)
+    
+    # Save initial champion (v0)
+    save_champion(champion_net, champion_version, 0, 0.0)
+    
     eps = EPS_START 
     
     for episode in range(1, NUM_EPISODES + 1):
-        # 2. SELF PLAY
-        new_states_seen = play_self_play_game(policy_net, eps) 
+        # 2. CHAMPION/CHALLENGER SELF-PLAY
+        # Coin flip: challenger is P1 or P2
+        challenger_is_p1 = (np.random.random() < 0.5)
+        new_states_seen, challenger_result = play_champion_challenger_game(
+            policy_net, champion_net, eps, challenger_is_p1
+        )
         
         for s in new_states_seen:
             unique_states_seen.add(s.tobytes()) 
@@ -1586,7 +1867,6 @@ def train_dqn_agent(policy_net, optimizer):
             policy_net.train()
             batch_terminal_counts = []
             
-            # We track the 'last' values of the loop to append to history
             last_loss = 0
             last_q_values = None
             last_predicted_qs = None
@@ -1613,17 +1893,14 @@ def train_dqn_agent(policy_net, optimizer):
                 q_values = policy_net(s_batch)
                 predicted_qs = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
                 
-                # Weighted MSE loss (importance sampling correction from PER)
                 td_errors = (predicted_qs - target_q).detach()
                 loss = (w_batch * (predicted_qs - target_q) ** 2).mean()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
                 
-                # Update PER priorities with TD-errors
                 replay_buffer.update_priorities(per_indices, td_errors.cpu().numpy())
                 
-                # Capture data for metrics
                 last_loss = loss.item()
                 last_q_values = q_values.detach()
                 last_predicted_qs = predicted_qs.detach()
@@ -1633,28 +1910,22 @@ def train_dqn_agent(policy_net, optimizer):
                 batch_terminal_counts.append(actual_pct)
 
             # --- SYNCHRONIZED METRIC LOGGING ---
-            # All these must be appended together so the list lengths match
             loss_history.append(last_loss)
             q_magnitude_history.append(torch.mean(torch.abs(last_q_values)).item())
             unique_states_history.append(len(unique_states_seen))
 
-            # Metric 3: Terminal Q-Mag (Win/Loss states)
-            # Find terminal states in the last batch
             terminal_mask = (last_dones == 1)
             if terminal_mask.any():
                 term_q = torch.mean(torch.abs(last_predicted_qs[terminal_mask])).item()
             else:
-                # Fallback if no terminal state in batch: use batch average
                 term_q = q_magnitude_history[-1]
             q_magnitude_history_win_loss.append(term_q)
 
-            # Metric 6 & 7: Neuron Health
             with torch.no_grad():
                 all_w = torch.cat([p.view(-1) for p in policy_net.parameters()])
                 dead_neuron_cnt_hist.append((torch.abs(all_w) < 0.01).sum().item() / all_w.numel())
                 exploding_neuron_cnt_hist.append((torch.abs(all_w) > 10.0).sum().item() / all_w.numel())
 
-            # Metric 8: Gradients
             total_grad = 0.0
             grad_count = 0
             for p in policy_net.parameters():
@@ -1663,21 +1934,58 @@ def train_dqn_agent(policy_net, optimizer):
                     grad_count += p.grad.numel()
             grad_history.append(total_grad / grad_count if grad_count > 0 else 0)
 
-            # Metric 9: Terminal % of Batch
             terminal_pct_history.append(np.mean(batch_terminal_counts))
 
             # 5. SYNC TARGET NETWORK
             if episode % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
                 
-            # 6. EVALUATION
+            # 6. EVALUATION (vs random + Q-decay)
             if episode % EVALUATION_FREQUENCY == 0:
                 win_rate = evaluate_vs_random(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
                 win_rate_vs_rand_hist.append(win_rate)
                 decay_curve = compute_q_decay_curve(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
                 q_decay_curve_history.append(decay_curve)
-                print(f"Ep {episode} | Eps: {eps:.2f} | Unique: {len(unique_states_seen)} | WinRate: {win_rate:.2f} | Q[0]={decay_curve[0]:.3f} Q[5]={decay_curve[5]:.3f}")
+            
+            # 7. CHAMPION/CHALLENGER EVALUATION
+            episodes_since_promotion += 1
+            if episode % CHAMPION_EVAL_FREQUENCY == 0:
+                wr, c_wins, ch_wins = evaluate_challenger_vs_champion(
+                    policy_net, champion_net, 
+                    num_games=CHAMPION_EVAL_GAMES,
+                    temperature=CHAMPION_EVAL_TEMPERATURE
+                )
+                
+                print(f"Ep {episode} | Eps: {eps:.2f} | vsRand: {win_rate_vs_rand_hist[-1] if win_rate_vs_rand_hist else 0:.2f} "
+                      f"| vsChamp: {wr:.2f} ({c_wins}W/{ch_wins}L) | Champion: v{champion_version} "
+                      f"| Stag: {episodes_since_promotion}")
+                
+                # Promote challenger?
+                if wr >= CHAMPION_THRESHOLD:
+                    champion_version += 1
+                    champion_net.load_state_dict(policy_net.state_dict())
+                    champion_net.eval()
+                    save_champion(policy_net, champion_version, episode, wr)
+                    champion_history.append((champion_version, episode, wr))
+                    episodes_since_promotion = 0
+                    # Bump epsilon to re-explore against new champion
+                    eps = min(EPS_START, eps + 0.1)
+                    print(f"  ★ PROMOTED to Champion v{champion_version} (win rate: {wr:.2f}) | Eps bumped to {eps:.2f}")
+                
+                # Stagnation check: revert if no promotion in too long
+                elif episodes_since_promotion >= MAX_STAGNATION_EPISODES:
+                    print(f"  ⚠ STAGNATION ({episodes_since_promotion} eps without promotion) — reverting to champion v{champion_version}")
+                    policy_net.load_state_dict(champion_net.state_dict())
+                    target_net.load_state_dict(champion_net.state_dict())
+                    # Reset optimizer state for fresh start
+                    for group in optimizer.param_groups:
+                        for p in group['params']:
+                            optimizer.state[p] = {}
+                    eps = EPS_START
+                    episodes_since_promotion = 0
 
+    print(f"\nTraining complete. Final champion: v{champion_version}")
+    print(f"Champion history: {champion_history}")
     return policy_net
                 
 
