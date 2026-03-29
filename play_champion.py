@@ -38,9 +38,9 @@ DIM    = "\033[2m"
 
 
 def load_policy(path, device="cpu"):
-    """Load a TorchScript policy. Returns (model, metadata_str)."""
+    """Load a TorchScript policy on CPU. Returns (model, metadata_str)."""
     extra = {"metadata.txt": ""}
-    model = torch.jit.load(path, map_location=device, _extra_files=extra)
+    model = torch.jit.load(path, map_location="cpu", _extra_files=extra)
     model.eval()
     meta = extra["metadata.txt"]
     if isinstance(meta, bytes):
@@ -51,7 +51,7 @@ def load_policy(path, device="cpu"):
 def agent_move(model, state, legal, device="cpu"):
     """Greedy action from a policy model. Returns (action, q_values)."""
     with torch.no_grad():
-        s = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        s = torch.from_numpy(state).float().unsqueeze(0)
         q = model(s).squeeze(0).cpu().numpy()
     masked = np.full(7, -1e9, dtype=np.float32)
     for m in legal:
