@@ -114,7 +114,7 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Training Hyperparameters (all in one place)
 # *****************************************************************
-NUM_EPISODES                = 1000
+NUM_EPISODES                = 5000
 BATCH_SIZE                  = 128
 LEARNING_RATE               = 0.001
 WEIGHT_DECAY                = 1e-4
@@ -143,9 +143,9 @@ MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N e
 CHAMPION_DIR                = os.path.join(root_dir, "models")
 
 # Experiment Tracking (Step 14)
-EXPERIMENT_ID               = "baseline_1k"
-EXPERIMENT_HYPOTHESIS       = "Baseline: current config at 1000 episodes"
-EXPERIMENT_CHANGES          = "No changes — establishing baseline"
+EXPERIMENT_ID               = "baseline_5k"
+EXPERIMENT_HYPOTHESIS       = "Baseline at 5000 episodes — does longer training improve threat recognition and planning?"
+EXPERIMENT_CHANGES          = "NUM_EPISODES=5000, everything else unchanged from baseline_1k"
 
 
 # *****************************************************************
