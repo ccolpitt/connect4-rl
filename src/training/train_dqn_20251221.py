@@ -103,6 +103,7 @@ import torch
 import torch.nn as nn
 from collections import deque
 from datetime import datetime
+import json
 root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
@@ -140,6 +141,11 @@ CHAMPION_THRESHOLD          = 0.55    # Win rate to promote challenger
 CHAMPION_EVAL_TEMPERATURE   = 0.3     # Softmax temperature for evaluation games
 MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N episodes
 CHAMPION_DIR                = os.path.join(root_dir, "models")
+
+# Experiment Tracking (Step 14)
+EXPERIMENT_ID               = "baseline_1k"
+EXPERIMENT_HYPOTHESIS       = "Baseline: current config at 1000 episodes"
+EXPERIMENT_CHANGES          = "No changes — establishing baseline"
 
 
 # *****************************************************************
@@ -1844,6 +1850,251 @@ print("Running Step 12: Champion/Challenger Infrastructure...")
 run_champion_challenger_tests()
 
 
+# *****************************************************************
+# STEP 13: Perspective Threat Test — 3-in-a-Row Q-Value Validation
+# *****************************************************************
+# Metrics tracked during training evaluation:
+#   - offensive_q: avg Q of winning move when current player has 3-in-a-row
+#   - defensive_q: avg Q of non-blocking moves when opponent has 3-in-a-row
+# offensive_q should approach +1, defensive_q should approach -1
+offensive_q_history = []
+defensive_q_history = []
+
+
+def build_three_in_a_row_horizontal(env, player=1):
+    """Build a board where `player` has 3 in a row horizontally on the bottom,
+    with column 3 open for the win. Opponent has pieces stacked elsewhere.
+    
+    Board (player=1):
+        . . . . . . .
+        . . . . . . .
+        . . . . . . .
+        . . . . . . .
+        O O . . . . .    <- opponent pieces (rows 4-5, cols 0-1)
+        X X X . O O .    <- player has 3 in a row, col 3 wins
+        0 1 2 3 4 5 6
+    
+    Returns: (state, winning_col, blocking_col) where winning_col=3
+    """
+    board = np.zeros((6, 7), dtype=int)
+    opponent = -player
+    # Player's 3 in a row: bottom row, cols 0-2
+    board[5, 0] = player
+    board[5, 1] = player
+    board[5, 2] = player
+    # Opponent pieces (to make it a realistic position)
+    board[5, 4] = opponent
+    board[5, 5] = opponent
+    board[4, 0] = opponent
+    board[4, 1] = opponent
+    
+    env.set_state(board, current_player=player)
+    return env.get_state(), 3, 3  # winning_col, blocking_col are both col 3
+
+
+def build_three_in_a_row_vertical(env, player=1):
+    """Build a board where `player` has 3 in a vertical column,
+    with the cell above open for the win.
+    
+    Board (player=1):
+        . . . . . . .
+        . . . . . . .
+        . . . . . . .
+        . . X . . . .    <- col 2, row 3 is open for win
+        O . X . . . .
+        O . X . O . .
+        0 1 2 3 4 5 6
+    
+    Returns: (state, winning_col=2, blocking_col=2)
+    """
+    board = np.zeros((6, 7), dtype=int)
+    opponent = -player
+    board[5, 2] = player
+    board[4, 2] = player
+    board[3, 2] = player
+    # Opponent pieces
+    board[5, 0] = opponent
+    board[4, 0] = opponent
+    board[5, 4] = opponent
+    
+    env.set_state(board, current_player=player)
+    return env.get_state(), 2, 2
+
+
+def build_three_in_a_row_diagonal(env, player=1):
+    """Build a board where `player` has 3 in a diagonal (rising),
+    with the next diagonal cell open for the win.
+    
+    Board (player=1):
+        . . . . . . .
+        . . . . . . .
+        . . . . . . .
+        . . . X . . .    <- col 3, row 3 wins (diagonal)
+        . . X O . . .
+        . X O O . . .
+        O O O X . . .    <- support pieces
+        0 1 2 3 4 5 6
+    
+    Actually let's keep it simpler — rising diagonal from (5,0):
+    """
+    board = np.zeros((6, 7), dtype=int)
+    opponent = -player
+    # Diagonal: (5,0), (4,1), (3,2) — need (2,3) to win
+    board[5, 0] = player
+    board[4, 1] = player
+    board[3, 2] = player
+    # Support pieces so the diagonal position is reachable
+    board[5, 1] = opponent
+    board[5, 2] = opponent
+    board[4, 2] = opponent
+    board[5, 3] = opponent  # col 3 has a piece at bottom
+    board[4, 3] = opponent  # and row 4
+    board[3, 3] = player    # row 3 — wait, this blocks our win
+    
+    # Simpler: horizontal is clearest. Let's just use horizontal + vertical.
+    # Skip diagonal for now — the horizontal and vertical tests are sufficient.
+    # Return horizontal as fallback
+    return build_three_in_a_row_horizontal(env, player)
+
+
+def evaluate_threat_scenarios(policy_net, verbose=False):
+    """Evaluate Q-values on 3-in-a-row threat scenarios.
+    
+    Returns:
+        offensive_avg: avg Q-value of the winning move (should approach +1)
+        defensive_avg: avg Q-value of non-blocking moves (should approach -1)
+    """
+    test_env = ConnectFourEnvironment(Config())
+    policy_net.eval()
+    
+    offensive_qs = []
+    defensive_qs = []
+    
+    builders = [
+        ("Horizontal", build_three_in_a_row_horizontal),
+        ("Vertical", build_three_in_a_row_vertical),
+    ]
+    
+    for name, builder in builders:
+        # --- OFFENSIVE: current player has 3-in-a-row, should play winning move ---
+        state, winning_col, blocking_col = builder(test_env, player=1)
+        with torch.no_grad():
+            q = policy_net(torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+            q = q.squeeze(0).cpu().numpy()
+        
+        win_q = q[winning_col]
+        offensive_qs.append(win_q)
+        
+        if verbose:
+            legal = test_env.get_legal_moves()
+            print(f"  {name} Offensive: Q[{winning_col}]={win_q:+.3f}  (all Q: {np.round(q, 3)})")
+        
+        # --- DEFENSIVE: opponent has 3-in-a-row, current player must block ---
+        # Flip: now it's the opponent's perspective. The opponent has 3-in-a-row,
+        # so from the current player's view, they MUST block or lose.
+        state_def, _, block_col = builder(test_env, player=-1)
+        # Now current_player is -1, and -1 has 3-in-a-row.
+        # We want to evaluate from player +1's perspective (the one who needs to block).
+        # So set current_player to +1 and get state.
+        test_env.current_player = 1
+        state_def = test_env.get_state()
+        
+        with torch.no_grad():
+            q_def = policy_net(torch.tensor(state_def, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+            q_def = q_def.squeeze(0).cpu().numpy()
+        
+        # Non-blocking moves should have Q close to -1 (you lose if you don't block)
+        legal_def = test_env.get_legal_moves()
+        non_blocking = [c for c in legal_def if c != block_col]
+        if non_blocking:
+            non_block_qs = [q_def[c] for c in non_blocking]
+            defensive_qs.extend(non_block_qs)
+            
+            if verbose:
+                print(f"  {name} Defensive: Q[block={block_col}]={q_def[block_col]:+.3f}  "
+                      f"Q[non-block]={np.round(non_block_qs, 3)}  (all Q: {np.round(q_def, 3)})")
+    
+    offensive_avg = np.mean(offensive_qs) if offensive_qs else 0.0
+    defensive_avg = np.mean(defensive_qs) if defensive_qs else 0.0
+    
+    return float(offensive_avg), float(defensive_avg)
+
+
+def run_threat_tests():
+    """Validate threat scenario infrastructure (Q-value quality tested during training)."""
+    passed = 0
+    failed = 0
+    test_env = ConnectFourEnvironment(Config())
+
+    # Test 13.1: Horizontal 3-in-a-row board is set up correctly
+    try:
+        state, win_col, block_col = build_three_in_a_row_horizontal(test_env, player=1)
+        assert state.shape == (2, 6, 7), f"State shape wrong: {state.shape}"
+        assert win_col == 3, f"Winning col should be 3, got {win_col}"
+        # Verify player has 3 pieces in bottom row
+        assert state[0, 5, 0] == 1.0 and state[0, 5, 1] == 1.0 and state[0, 5, 2] == 1.0, \
+            "Player should have pieces at (5,0), (5,1), (5,2)"
+        # Verify col 3 is open
+        legal = test_env.get_legal_moves()
+        assert 3 in legal, "Column 3 should be legal (winning move)"
+        print(f"✓ Test 13.1: Horizontal 3-in-a-row board correct (win col={win_col})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 13.1 FAILED: {e}")
+        failed += 1
+
+    # Test 13.2: Vertical 3-in-a-row board is set up correctly
+    try:
+        state, win_col, block_col = build_three_in_a_row_vertical(test_env, player=1)
+        assert win_col == 2, f"Winning col should be 2, got {win_col}"
+        # Verify 3 pieces in column 2
+        assert state[0, 5, 2] == 1.0 and state[0, 4, 2] == 1.0 and state[0, 3, 2] == 1.0, \
+            "Player should have pieces at col 2, rows 3-5"
+        print(f"✓ Test 13.2: Vertical 3-in-a-row board correct (win col={win_col})")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 13.2 FAILED: {e}")
+        failed += 1
+
+    # Test 13.3: evaluate_threat_scenarios runs without error
+    try:
+        off_q, def_q = evaluate_threat_scenarios(policy_net, verbose=True)
+        assert np.isfinite(off_q), f"Offensive Q is not finite: {off_q}"
+        assert np.isfinite(def_q), f"Defensive Q is not finite: {def_q}"
+        print(f"✓ Test 13.3: Threat evaluation runs (offensive={off_q:+.3f}, defensive={def_q:+.3f})")
+        print(f"  (Untrained net — values will improve during training)")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 13.3 FAILED: {e}")
+        failed += 1
+
+    # Test 13.4: Flipped perspective produces different Q-values
+    try:
+        state_p1, _, _ = build_three_in_a_row_horizontal(test_env, player=1)
+        state_p2, _, _ = build_three_in_a_row_horizontal(test_env, player=-1)
+        test_env.current_player = 1
+        state_p2_view = test_env.get_state()
+        with torch.no_grad():
+            q1 = policy_net(torch.tensor(state_p1, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+            q2 = policy_net(torch.tensor(state_p2_view, dtype=torch.float32).unsqueeze(0).to(DEVICE))
+        assert not torch.allclose(q1, q2), "Offensive and defensive views should produce different Q-values"
+        print(f"✓ Test 13.4: Offensive vs defensive perspectives produce different Q-values")
+        passed += 1
+    except (AssertionError, Exception) as e:
+        print(f"✗ Test 13.4 FAILED: {e}")
+        failed += 1
+
+    print(f"\n{'='*50}")
+    print(f"Step 13 Threat Tests: {passed} passed, {failed} failed")
+    print(f"{'='*50}\n")
+
+    if failed > 0:
+        raise RuntimeError(f"Step 13 FAILED: {failed} test(s) did not pass.")
+
+print("Running Step 13: Perspective Threat Tests...")
+run_threat_tests()
+
+
 def train_dqn_agent(policy_net, optimizer):
     # 1. SETUP
     target_net = copy.deepcopy(policy_net) 
@@ -1953,12 +2204,16 @@ def train_dqn_agent(policy_net, optimizer):
             if episode % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
                 
-            # 6. EVALUATION (vs random + Q-decay)
+            # 6. EVALUATION (vs random + Q-decay + threat scenarios)
             if episode % EVALUATION_FREQUENCY == 0:
                 win_rate = evaluate_vs_random(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
                 win_rate_vs_rand_hist.append(win_rate)
                 decay_curve = compute_q_decay_curve(policy_net, num_games=EVAL_VS_RANDOM_GAME_COUNT)
                 q_decay_curve_history.append(decay_curve)
+                # Step 13: Threat scenario Q-values
+                off_q, def_q = evaluate_threat_scenarios(policy_net)
+                offensive_q_history.append(off_q)
+                defensive_q_history.append(def_q)
             
             # 7. CHAMPION/CHALLENGER EVALUATION
             episodes_since_promotion += 1
@@ -1969,9 +2224,12 @@ def train_dqn_agent(policy_net, optimizer):
                     temperature=CHAMPION_EVAL_TEMPERATURE
                 )
                 
+                threat_str = ""
+                if offensive_q_history:
+                    threat_str = f" | Threat: off={offensive_q_history[-1]:+.2f} def={defensive_q_history[-1]:+.2f}"
                 print(f"Ep {episode} | Eps: {eps:.2f} | vsRand: {win_rate_vs_rand_hist[-1] if win_rate_vs_rand_hist else 0:.2f} "
                       f"| vsChamp: {wr:.2f} ({c_wins}W/{ch_wins}L) | Champion: v{champion_version} "
-                      f"| Stag: {episodes_since_promotion}")
+                      f"| Stag: {episodes_since_promotion}{threat_str}")
                 
                 # Promote challenger?
                 if wr >= CHAMPION_THRESHOLD:
@@ -2134,15 +2392,14 @@ def train_on_synthetic_replay_buffer(policy_net, optimizer):
 # *****************************************************************
 def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist, 
                           win_rate_hist, dead_hist, exploding_hist, grad_hist, 
-                          terminal_pct_hist, q_decay_curves, eval_freq=10):
+                          terminal_pct_hist, q_decay_curves, 
+                          off_q_hist=None, def_q_hist=None, eval_freq=10):
     """
-    Plotting function for DQN training.
-    8 subplots: 6 original metrics + Q-decay curve + placeholder.
+    Plotting function for DQN training. 3x3 grid = 9 subplots.
     """
-    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+    fig, axes = plt.subplots(3, 3, figsize=(24, 15))
     fig.suptitle('Connect-4 DQN Training Dashboard', fontsize=16, fontweight='bold')
     
-    # Generate x-axis indices
     episodes = np.arange(len(loss_hist))
     eval_episodes = np.arange(1, len(win_rate_hist) + 1) * eval_freq
 
@@ -2156,14 +2413,14 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
-    # --- Plot 2: Q-Value Magnitudes (Combined) ---
+    # --- Plot 2: Q-Value Magnitudes ---
     ax = axes[0, 1]
     ax.plot(episodes, q_hist, label='Avg All States', alpha=0.8)
     ax.plot(episodes, q_terminal_hist, label='Avg Win/Loss States', alpha=0.8, linestyle='--')
     ax.set_title('Mean |Q| Predictions')
     ax.axhline(y=1.0, color='r', linestyle=':', label='Target (1.0)')
     ax.set_ylim(0, 2.0)
-    ax.legend()
+    ax.legend(fontsize='x-small')
     ax.grid(True, alpha=0.3)
 
     # --- Plot 3: Exploration (Unique States) ---
@@ -2174,22 +2431,20 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.grid(True, alpha=0.3)
 
     # --- Plot 4: Q-Value Decay Curve (Step 8) ---
-    ax = axes[0, 3]
+    ax = axes[1, 0]
     if len(q_decay_curves) > 0:
-        # Plot first, middle, and last curves to show progression
         indices_to_plot = [0]
         if len(q_decay_curves) > 2:
             indices_to_plot.append(len(q_decay_curves) // 2)
         if len(q_decay_curves) > 1:
             indices_to_plot.append(len(q_decay_curves) - 1)
         
-        colors = ['lightblue', 'orange', 'red']
+        colors_dc = ['lightblue', 'orange', 'red']
         for ci, curve_idx in enumerate(indices_to_plot):
             curve = q_decay_curves[curve_idx]
-            # Only plot up to the max non-zero index
             max_idx = max(np.nonzero(curve)[0]) + 1 if np.any(curve > 0) else 1
             label = f"Eval {curve_idx + 1}"
-            ax.plot(range(max_idx), curve[:max_idx], color=colors[ci % len(colors)], 
+            ax.plot(range(max_idx), curve[:max_idx], color=colors_dc[ci % len(colors_dc)], 
                     alpha=0.8, label=label, linewidth=1.5)
         ax.axhline(y=1.0, color='r', linestyle=':', alpha=0.5)
         ax.set_xlabel('Moves from end (0=final)')
@@ -2199,7 +2454,7 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.grid(True, alpha=0.3)
 
     # --- Plot 5: Win Rate AND Terminal % ---
-    ax = axes[1, 0]
+    ax = axes[1, 1]
     ax.plot(episodes, terminal_pct_hist, color='cyan', alpha=0.2, label='Batch Terminal %')
     ax.plot(eval_episodes, win_rate_hist, marker='o', color='gold', 
             markersize=4, linewidth=2, label='Win Rate vs Random')
@@ -2212,7 +2467,7 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.grid(True, alpha=0.3)
 
     # --- Plot 6: NN Health (Combined Dead/Exploding) ---
-    ax = axes[1, 1]
+    ax = axes[1, 2]
     ax.plot(episodes, dead_hist, label='Dead (<0.01)', color='black')
     ax.plot(episodes, exploding_hist, label='Exploding (>10)', color='red')
     ax.set_title('Neuron Health (Weight Counts)')
@@ -2220,22 +2475,21 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.grid(True, alpha=0.3)
 
     # --- Plot 7: Gradients ---
-    ax = axes[1, 2]
+    ax = axes[2, 0]
     ax.plot(episodes, grad_hist, color='purple')
     ax.set_title('Mean Absolute Gradient')
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
     # --- Plot 8: Q-Value by Moves-from-End over Training ---
-    ax = axes[1, 3]
+    ax = axes[2, 1]
     if len(q_decay_curves) > 1:
-        curves_arr = np.array(q_decay_curves)  # shape: (num_evals, 42)
+        curves_arr = np.array(q_decay_curves)
         eval_x = np.arange(1, len(q_decay_curves) + 1)
-        # Positions to track: last, 2nd-last, 3rd, 4th, 5th, 10th, 15th, 20th
         positions = [0, 1, 2, 3, 4, 9, 14, 19]
-        labels =    ['Last', '2nd', '3rd', '4th', '5th', '10th', '15th', '20th']
-        colors =    ['red', 'orangered', 'orange', 'gold', 'green', 'teal', 'blue', 'purple']
-        for pos, lbl, clr in zip(positions, labels, colors):
+        labels_mfe = ['Last', '2nd', '3rd', '4th', '5th', '10th', '15th', '20th']
+        colors_mfe = ['red', 'orangered', 'orange', 'gold', 'green', 'teal', 'blue', 'purple']
+        for pos, lbl, clr in zip(positions, labels_mfe, colors_mfe):
             vals = curves_arr[:, pos]
             ax.plot(eval_x, vals, color=clr, label=lbl, alpha=0.8, linewidth=1.2)
         ax.axhline(y=1.0, color='r', linestyle=':', alpha=0.3)
@@ -2245,16 +2499,33 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.set_title('Q by Moves-from-End')
     ax.grid(True, alpha=0.3)
 
+    # --- Plot 9: Offensive / Defensive Threat Check (Step 13) ---
+    ax = axes[2, 2]
+    if off_q_hist and len(off_q_hist) > 0:
+        threat_x = np.arange(1, len(off_q_hist) + 1)
+        ax.plot(threat_x, off_q_hist, color='green', marker='o', markersize=4, 
+                linewidth=2, label='Q of winning move')
+        ax.plot(threat_x, def_q_hist, color='red', marker='x', markersize=4, 
+                linewidth=2, label='Avg Q of non-blocking moves')
+        ax.axhline(y=1.0, color='green', linestyle=':', alpha=0.4)
+        ax.axhline(y=-1.0, color='red', linestyle=':', alpha=0.4)
+        ax.axhline(y=0.0, color='gray', linestyle='-', alpha=0.2)
+        ax.set_xlabel('Evaluation #')
+        ax.set_ylabel('Q-value')
+        ax.legend(fontsize='x-small')
+    ax.set_title('Offensive / Defensive Check')
+    ax.set_ylim(-1.5, 1.5)
+    ax.grid(True, alpha=0.3)
+
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig('models/training_dashboard.png', dpi=150, bbox_inches='tight')
     print("Dashboard saved to models/training_dashboard.png")
     plt.close()
 
 # *****************************************************************
-# Train, show results
+# Train, show results, log experiment
 # *****************************************************************
-train_dqn_agent(policy_net, optimizer)                                           # <--- REAL SELF PLAY
-#train_on_synthetic_replay_buffer(policy_net, optimizer)    # <--- SYNTHETIC EXPERIENCE
+train_dqn_agent(policy_net, optimizer)
 
 plot_training_metrics(
     loss_history,
@@ -2267,17 +2538,116 @@ plot_training_metrics(
     grad_history,
     terminal_pct_history,
     q_decay_curve_history,
+    off_q_hist=offensive_q_history,
+    def_q_hist=defensive_q_history,
     eval_freq=EVALUATION_FREQUENCY)
 
 
+# *****************************************************************
+# Save experiment results
+# *****************************************************************
+def save_experiment():
+    """Save full experiment results: summary to experiments.json, details to exp folder."""
+    exp_dir = os.path.join(CHAMPION_DIR, f"exp_{EXPERIMENT_ID}")
+    os.makedirs(exp_dir, exist_ok=True)
+    
+    # Save detailed metrics (convert numpy types for JSON)
+    def to_json_safe(v):
+        if isinstance(v, (np.floating, np.integer)):
+            return float(v)
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, list):
+            return [to_json_safe(x) for x in v]
+        return v
+    
+    metrics = {
+        "loss_history": to_json_safe(loss_history),
+        "q_magnitude_history": to_json_safe(q_magnitude_history),
+        "q_magnitude_history_win_loss": to_json_safe(q_magnitude_history_win_loss),
+        "unique_states_history": to_json_safe(unique_states_history),
+        "win_rate_vs_rand_hist": to_json_safe(win_rate_vs_rand_hist),
+        "dead_neuron_cnt_hist": to_json_safe(dead_neuron_cnt_hist),
+        "exploding_neuron_cnt_hist": to_json_safe(exploding_neuron_cnt_hist),
+        "grad_history": to_json_safe(grad_history),
+        "terminal_pct_history": to_json_safe(terminal_pct_history),
+        "q_decay_curve_history": [c.tolist() for c in q_decay_curve_history],
+        "offensive_q_history": to_json_safe(offensive_q_history),
+        "defensive_q_history": to_json_safe(defensive_q_history),
+    }
+    metrics_path = os.path.join(exp_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f)
+    
+    # Copy dashboard
+    import shutil
+    dash_src = os.path.join(CHAMPION_DIR, "training_dashboard.png")
+    if os.path.exists(dash_src):
+        shutil.copy2(dash_src, os.path.join(exp_dir, "training_dashboard.png"))
+    
+    # Copy champion_current.pt into experiment folder
+    champ_src = os.path.join(CHAMPION_DIR, "champion_current.pt")
+    if os.path.exists(champ_src):
+        shutil.copy2(champ_src, os.path.join(exp_dir, "champion_current.pt"))
+    
+    # Append summary to experiments.json
+    experiments_path = os.path.join(CHAMPION_DIR, "experiments.json")
+    if os.path.exists(experiments_path):
+        with open(experiments_path, "r") as f:
+            experiments = json.load(f)
+    else:
+        experiments = []
+    
+    summary = {
+        "id": EXPERIMENT_ID,
+        "hypothesis": EXPERIMENT_HYPOTHESIS,
+        "changes": EXPERIMENT_CHANGES,
+        "timestamp": datetime.now().isoformat(),
+        "episodes": NUM_EPISODES,
+        "hyperparameters": {
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY,
+            "training_iterations": TRAINING_ITERATIONS,
+            "gamma": GAMMA,
+            "eps_start": EPS_START,
+            "eps_end": EPS_END,
+            "eps_decay": EPS_DECAY,
+            "target_update_freq": TARGET_UPDATE_FREQ,
+            "terminal_rate": TERMINAL_RATE,
+            "dropout_rate": DROPOUT_RATE,
+            "replay_buffer_capacity": REPLAY_BUFFER_CAPACITY,
+            "per_alpha": PER_ALPHA,
+            "per_beta_start": PER_BETA_START,
+            "champion_eval_frequency": CHAMPION_EVAL_FREQUENCY,
+            "champion_threshold": CHAMPION_THRESHOLD,
+            "max_stagnation_episodes": MAX_STAGNATION_EPISODES,
+        },
+        "results": {
+            "final_win_rate_vs_random": win_rate_vs_rand_hist[-1] if win_rate_vs_rand_hist else None,
+            "final_offensive_q": offensive_q_history[-1] if offensive_q_history else None,
+            "final_defensive_q": defensive_q_history[-1] if defensive_q_history else None,
+            "final_loss": loss_history[-1] if loss_history else None,
+            "unique_states": unique_states_history[-1] if unique_states_history else None,
+            "champion_file": os.path.join(f"exp_{EXPERIMENT_ID}", "champion_current.pt"),
+        },
+        "league_rank": None,  # Updated after league play
+    }
+    
+    # Replace if same ID exists, otherwise append
+    existing_idx = next((i for i, e in enumerate(experiments) if e["id"] == EXPERIMENT_ID), None)
+    if existing_idx is not None:
+        experiments[existing_idx] = summary
+    else:
+        experiments.append(summary)
+    
+    with open(experiments_path, "w") as f:
+        json.dump(experiments, f, indent=2)
+    
+    print(f"\nExperiment '{EXPERIMENT_ID}' saved to {exp_dir}/")
+    print(f"  Hypothesis: {EXPERIMENT_HYPOTHESIS}")
+    print(f"  Win rate vs random: {summary['results']['final_win_rate_vs_random']}")
+    print(f"  Offensive Q: {summary['results']['final_offensive_q']}")
+    print(f"  Defensive Q: {summary['results']['final_defensive_q']}")
 
-# *****************************************************************
-# Save the policy 
-# *****************************************************************
-
-
-# *****************************************************************
-# Test the trained policy 
-# *****************************************************************
-# Audit function commented out — uses old DQN buffer API, will update for PER later
-# To re-enable, update to work with PrioritizedReplayBuffer's SumTree storage
+save_experiment()
