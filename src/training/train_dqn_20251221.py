@@ -143,9 +143,9 @@ MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N e
 CHAMPION_DIR                = os.path.join(root_dir, "models")
 
 # Experiment Tracking (Step 14)
-EXPERIMENT_ID               = "baseline_5k"
-EXPERIMENT_HYPOTHESIS       = "Baseline at 5000 episodes — does longer training improve threat recognition and planning?"
-EXPERIMENT_CHANGES          = "NUM_EPISODES=5000, everything else unchanged from baseline_1k"
+EXPERIMENT_ID               = "double_dqn_5k"
+EXPERIMENT_HYPOTHESIS       = "Double DQN: use policy_net to select next action, target_net to evaluate. Should reduce Q-value overestimation and improve threat Q stability (baseline_5k showed regression from -0.92 to -0.48)"
+EXPERIMENT_CHANGES          = "Double DQN target computation in training loop"
 
 
 # *****************************************************************
@@ -2148,9 +2148,14 @@ def train_dqn_agent(policy_net, optimizer):
                 w_batch = torch.tensor(is_weights, dtype=torch.float32).to(DEVICE)
 
                 with torch.no_grad():
-                    next_q_values = target_net(ns_batch) 
-                    masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
-                    next_q_max = masked_next_q.max(dim=1)[0]
+                    # Double DQN: policy_net selects best action, target_net evaluates it
+                    # This reduces Q-value overestimation vs standard DQN
+                    policy_next_q = policy_net(ns_batch)
+                    masked_policy_q = policy_next_q.masked_fill(m_batch == 0, -1e9)
+                    best_actions = masked_policy_q.argmax(dim=1, keepdim=True)
+                    
+                    target_next_q = target_net(ns_batch)
+                    next_q_max = target_next_q.gather(1, best_actions).squeeze(1)
                     target_q = r_batch - (GAMMA * next_q_max * (1 - d_batch))
 
                 optimizer.zero_grad()
