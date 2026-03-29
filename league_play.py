@@ -117,10 +117,15 @@ def run_tournament(policy_paths, games_per_matchup=20):
         info = parse_metadata(meta)
         ver = info.get("version", "?")
         ep = info.get("episode", "?")
-        label = f"v{ver} (ep{ep})"
+        # Use parent folder name if it's an experiment folder, otherwise filename
+        parent = os.path.basename(os.path.dirname(path))
+        if parent.startswith("exp_"):
+            label = parent.replace("exp_", "")
+        else:
+            label = f"v{ver}_ep{ep}"
         labels.append(label)
         models.append(model)
-        print(f"  {label}: {os.path.basename(path)}")
+        print(f"  {label}: {path}")
 
     # Win matrix: wins[i][j] = how many times i beat j
     wins = np.zeros((n, n), dtype=int)
