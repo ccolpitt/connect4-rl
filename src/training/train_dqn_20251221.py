@@ -731,28 +731,37 @@ def evaluate_challenger_vs_champion(challenger_net, champion_net, num_games=50, 
 
 
 def save_champion(policy_net, version, episode, win_rate_vs_champion):
-    """Save a promoted champion to the models directory."""
+    """Save a promoted champion as a TorchScript model (architecture-agnostic).
+    
+    Saves two files per champion:
+    - champion_v{N}_{timestamp}.pt  — TorchScript traced model (portable, no class needed)
+    - champion_current.pt           — always points to latest champion
+    
+    The .pt files can be loaded with just torch.jit.load() — no knowledge
+    of the network architecture required.
+    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"champion_v{version}_{timestamp}.pth"
+    filename = f"champion_v{version}_{timestamp}.pt"
     filepath = os.path.join(CHAMPION_DIR, filename)
     
-    torch.save({
-        'model_state_dict': policy_net.state_dict(),
-        'version': version,
-        'episode': episode,
-        'win_rate_vs_champion': win_rate_vs_champion,
-        'timestamp': timestamp,
-    }, filepath)
+    # Trace the model on CPU for portability (works on any device at load time)
+    policy_net.eval()
+    # Move state_dict to CPU and create a fresh CPU network for tracing
+    cpu_state = {k: v.cpu() for k, v in policy_net.state_dict().items()}
+    net_cpu = Connect4Net(device=torch.device("cpu"), dropout_rate=DROPOUT_RATE)
+    net_cpu.load_state_dict(cpu_state)
+    net_cpu.eval()
+    dummy_input = torch.zeros(1, 2, 6, 7, dtype=torch.float32)
+    traced = torch.jit.trace(net_cpu, dummy_input)
+    
+    # Save TorchScript model with metadata as extra files
+    metadata = (f"version={version}\nepisode={episode}\n"
+                f"win_rate_vs_champion={win_rate_vs_champion}\ntimestamp={timestamp}")
+    torch.jit.save(traced, filepath, _extra_files={"metadata.txt": metadata})
     
     # Also save as current champion
-    current_path = os.path.join(CHAMPION_DIR, "champion_current.pth")
-    torch.save({
-        'model_state_dict': policy_net.state_dict(),
-        'version': version,
-        'episode': episode,
-        'win_rate_vs_champion': win_rate_vs_champion,
-        'timestamp': timestamp,
-    }, current_path)
+    current_path = os.path.join(CHAMPION_DIR, "champion_current.pt")
+    torch.jit.save(traced, current_path, _extra_files={"metadata.txt": metadata})
     
     print(f"  Champion v{version} saved → {filename}")
     return filepath
@@ -1799,11 +1808,15 @@ def run_champion_challenger_tests():
     try:
         test_path = save_champion(policy_net, version=999, episode=0, win_rate_vs_champion=0.0)
         assert os.path.exists(test_path), f"Champion file not created: {test_path}"
+        # Verify it's loadable with torch.jit.load (architecture-agnostic)
+        loaded = torch.jit.load(test_path, map_location="cpu")
+        test_out = loaded(torch.zeros(1, 2, 6, 7))
+        assert test_out.shape == (1, 7), f"Loaded model output shape wrong: {test_out.shape}"
         # Clean up test file
         os.remove(test_path)
-        current_path = os.path.join(CHAMPION_DIR, "champion_current.pth")
-        assert os.path.exists(current_path), "champion_current.pth not created"
-        print(f"✓ Test 12.5: save_champion creates file successfully")
+        current_path = os.path.join(CHAMPION_DIR, "champion_current.pt")
+        assert os.path.exists(current_path), "champion_current.pt not created"
+        print(f"✓ Test 12.5: save_champion creates TorchScript file, loadable without class definition")
         passed += 1
     except (AssertionError, Exception) as e:
         print(f"✗ Test 12.5 FAILED: {e}")
@@ -2149,6 +2162,7 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.plot(episodes, q_terminal_hist, label='Avg Win/Loss States', alpha=0.8, linestyle='--')
     ax.set_title('Mean |Q| Predictions')
     ax.axhline(y=1.0, color='r', linestyle=':', label='Target (1.0)')
+    ax.set_ylim(0, 2.0)
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -2232,9 +2246,9 @@ def plot_training_metrics(loss_hist, q_hist, q_terminal_hist, states_hist,
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig('training_dashboard.png', dpi=150, bbox_inches='tight')
-    print("Dashboard saved to training_dashboard.png")
-    plt.show()
+    plt.savefig('models/training_dashboard.png', dpi=150, bbox_inches='tight')
+    print("Dashboard saved to models/training_dashboard.png")
+    plt.close()
 
 # *****************************************************************
 # Train, show results
