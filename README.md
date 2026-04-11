@@ -49,3 +49,17 @@ Development Roadmap
  AlphaZero agent
  Training visualization
  Interactive gameplay
+
+ ## Automated Development Approach
+ Agents have progressed to the point where they can measure the performance of a policy relative to another, hypothesize improvements, and measure the results.  This in effect, creates the kernel of guided algorithmic evolution.
+
+ Parts of the solution:
+ * Policy repository.  Include metadata like train date, architecture summary, how it was trained (e.g. episodes)
+ * Policy rankings, based on a tournament.  We could use an ELO scoring system.
+ * Tournament player (For after a training run)
+ * Environment.
+ * Network: Parameterized, easy to adjust or change.
+ * Replay buffer.  We can do prioritized etc.
+
+
+ After C4, work on multi-rewards, continuoud learning, multi-task, curiosity, a world model, hiearchy of agents, reconsider vanilla nn's

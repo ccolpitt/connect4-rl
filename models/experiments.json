@@ -173,5 +173,75 @@
       "champion_file": "exp_ddqn_4iter_5k/champion_current.pt"
     },
     "league_rank": null
+  },
+  {
+    "id": "ddqn_wide_fc_5k",
+    "hypothesis": "Wider FC layer (256 vs 128): more capacity for complex board patterns. League shows baseline_5k > double_dqn_5k > 4iter > low_lr. More iterations and lower LR both hurt. Trying more network capacity instead. Keeping Double DQN, LR=0.001, 2 iterations.",
+    "changes": "FC1: 2688->256->7 (was 2688->128->7), TRAINING_ITERATIONS reverted to 2",
+    "timestamp": "2026-04-10T23:04:42.001007",
+    "episodes": 5000,
+    "hyperparameters": {
+      "batch_size": 128,
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "training_iterations": 2,
+      "gamma": 0.99,
+      "eps_start": 0.5,
+      "eps_end": 0.1,
+      "eps_decay": 0.999,
+      "target_update_freq": 50,
+      "terminal_rate": 0.3,
+      "dropout_rate": 0.05,
+      "replay_buffer_capacity": 20000,
+      "per_alpha": 0.6,
+      "per_beta_start": 0.4,
+      "champion_eval_frequency": 200,
+      "champion_threshold": 0.55,
+      "max_stagnation_episodes": 1000
+    },
+    "results": {
+      "final_win_rate_vs_random": 1.0,
+      "final_offensive_q": 0.6943206787109375,
+      "final_defensive_q": -0.45271506905555725,
+      "final_loss": 0.00814417190849781,
+      "unique_states": 11524,
+      "champion_file": "exp_ddqn_wide_fc_5k/champion_current.pt"
+    },
+    "league_rank": null
+  },
+  {
+    "id": "baseline_20k",
+    "hypothesis": "Hero run: baseline config at 20K episodes. Data shows more episodes is the single biggest factor (1K\u21925K was 50-0 improvement). All 'clever' changes (Double DQN, low LR, more iterations, wider FC) failed to beat baseline_5k. Reverting to simplest config and scaling up.",
+    "changes": "NUM_EPISODES=20000, reverted to standard DQN, FC=128, LR=0.001, 2 iterations",
+    "timestamp": "2026-04-11T00:56:05.709067",
+    "episodes": 20000,
+    "hyperparameters": {
+      "batch_size": 128,
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "training_iterations": 2,
+      "gamma": 0.99,
+      "eps_start": 0.5,
+      "eps_end": 0.1,
+      "eps_decay": 0.999,
+      "target_update_freq": 50,
+      "terminal_rate": 0.3,
+      "dropout_rate": 0.05,
+      "replay_buffer_capacity": 50000,
+      "per_alpha": 0.6,
+      "per_beta_start": 0.4,
+      "champion_eval_frequency": 200,
+      "champion_threshold": 0.55,
+      "max_stagnation_episodes": 1000
+    },
+    "results": {
+      "final_win_rate_vs_random": 1.0,
+      "final_offensive_q": 0.8061147928237915,
+      "final_defensive_q": -0.6775131821632385,
+      "final_loss": 0.009579136036336422,
+      "unique_states": 73607,
+      "champion_file": "exp_baseline_20k/champion_current.pt"
+    },
+    "league_rank": null
   }
 ]

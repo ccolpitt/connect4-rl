@@ -62,7 +62,7 @@ of the steps are complete, but please check.
     when to overwrite the champion with a new challenger.  I think each TRAIN_VS_CHAMPTION_EPISODES
     we should face off with the current challenger policy.  Or, we track the win/loss rate for the 
     challenger vs. champion, and switch when it wins more than say 60% of the time - but we could
-    parameterize.  I think we want the challenger to not use epsilon when evaluating vs. the 
+    parameterize.  I think we want the challenger to not use epsilon greedy when evaluating vs. the 
     champion - but we can discuss.
 13: Perspective threat test - after training,  test with three in a row from play 1 and 2 perspective.  
     Verify that  Q values change a lot.  If player 1 has three in a row, the Q values of next moves 
@@ -114,11 +114,11 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 # Training Hyperparameters (all in one place)
 # *****************************************************************
-NUM_EPISODES                = 5000
+NUM_EPISODES                = 20000
 BATCH_SIZE                  = 128
 LEARNING_RATE               = 0.001
 WEIGHT_DECAY                = 1e-4
-TRAINING_ITERATIONS         = 4       # Training steps per game
+TRAINING_ITERATIONS         = 2       # Training steps per game
 EVAL_VS_RANDOM_GAME_COUNT   = 50
 GAMMA                       = 0.99
 EVALUATION_FREQUENCY        = 100     # Evaluate every N episodes
@@ -128,7 +128,7 @@ EPS_DECAY                   = 0.999
 TARGET_UPDATE_FREQ          = 50
 TERMINAL_RATE               = 0.3     # Target terminal ratio in batch sampling
 DROPOUT_RATE                = 0.05
-REPLAY_BUFFER_CAPACITY      = 20000
+REPLAY_BUFFER_CAPACITY      = 50000
 PER_ALPHA                   = 0.6     # Prioritization exponent (0=uniform, 1=full priority)
 PER_BETA_START              = 0.4     # Importance sampling start (annealed to 1.0)
 PER_BETA_FRAMES             = 100000  # Frames to anneal beta to 1.0
@@ -142,10 +142,21 @@ CHAMPION_EVAL_TEMPERATURE   = 0.3     # Softmax temperature for evaluation games
 MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N episodes
 CHAMPION_DIR                = os.path.join(root_dir, "models")
 
+# Neuron Reinitialization (Sutton-style continual backpropagation)
+REINIT_ENABLED              = False   # Set True to enable periodic neuron reinitialization
+REINIT_FREQUENCY            = 500     # Reinitialize every N episodes
+REINIT_FRACTION             = 0.1     # Fraction of lowest-utility neurons to reinitialize
+
+# Reference Policy Benchmark (early stopping for bad runs)
+REFERENCE_POLICY_PATH       = None    # Path to .pt file, or None to skip
+REFERENCE_EVAL_GAMES        = 50      # Games per reference evaluation
+REFERENCE_MIN_EPISODES      = 5000    # Don't check reference until this many episodes
+REFERENCE_MIN_WIN_RATE      = 0.45    # Halt if below this win rate after REFERENCE_MIN_EPISODES
+
 # Experiment Tracking (Step 14)
-EXPERIMENT_ID               = "ddqn_4iter_5k"
-EXPERIMENT_HYPOTHESIS       = "More training iterations per game (4 vs 2): extract more learning from each self-play game. With Double DQN at LR=0.001. Low LR failed (ddqn_low_lr_5k tied baseline_1k), so keeping LR=0.001 and increasing gradient steps instead."
-EXPERIMENT_CHANGES          = "TRAINING_ITERATIONS=4 (was 2), LR reverted to 0.001"
+EXPERIMENT_ID               = "baseline_20k"
+EXPERIMENT_HYPOTHESIS       = "Hero run: baseline config at 20K episodes. Data shows more episodes is the single biggest factor (1K→5K was 50-0 improvement). All 'clever' changes (Double DQN, low LR, more iterations, wider FC) failed to beat baseline_5k. Reverting to simplest config and scaling up."
+EXPERIMENT_CHANGES          = "NUM_EPISODES=20000, reverted to standard DQN, FC=128, LR=0.001, 2 iterations"
 
 
 # *****************************************************************
@@ -434,6 +445,52 @@ class Connect4Net(nn.Module):
 
 
 # *****************************************************************
+# Neuron Reinitialization (Sutton-style Continual Backpropagation)
+# *****************************************************************
+def reinitialize_low_utility_neurons(net, fraction=0.1):
+    """Reinitialize the lowest-utility neurons in FC layers.
+    
+    Utility = L1 norm of outgoing weights (how much a neuron contributes to output).
+    Neurons with near-zero outgoing weights are effectively dead — reinitializing
+    them gives the network fresh capacity to learn new patterns.
+    
+    Only targets FC layers (conv layers rarely have dead neurons with LeakyReLU).
+    
+    Args:
+        net: Connect4Net instance
+        fraction: Fraction of neurons to reinitialize (0.1 = bottom 10%)
+    
+    Returns:
+        int: Number of neurons reinitialized
+    """
+    reinit_count = 0
+    
+    # FC1 → output: utility of FC1 neurons = L1 norm of their row in output.weight
+    # output.weight shape: (7, 128) — each column corresponds to one FC1 neuron
+    with torch.no_grad():
+        fc1_weight = net.fc1.weight  # (128, 2688)
+        output_weight = net.output.weight  # (7, 128)
+        
+        # Utility: how much each FC1 neuron contributes to the output
+        utility = output_weight.abs().sum(dim=0)  # (128,) — sum across 7 outputs
+        
+        n_reinit = max(1, int(fraction * utility.numel()))
+        _, lowest_indices = torch.topk(utility, n_reinit, largest=False)
+        
+        for idx in lowest_indices:
+            # Reinitialize incoming weights (from conv features to this neuron)
+            nn.init.kaiming_normal_(fc1_weight[idx:idx+1, :], mode='fan_out', nonlinearity='leaky_relu')
+            # Reinitialize bias
+            if net.fc1.bias is not None:
+                net.fc1.bias[idx] = 0.0
+            # Reinitialize outgoing weights (from this neuron to output)
+            nn.init.kaiming_normal_(output_weight[:, idx:idx+1], mode='fan_out', nonlinearity='leaky_relu')
+            reinit_count += 1
+    
+    return reinit_count
+
+
+# *****************************************************************
 # Step 2: Network Validation Tests
 # *****************************************************************
 def run_network_tests():
@@ -517,7 +574,7 @@ def run_network_tests():
     # Test 6: Parameter count is reasonable
     total_params = sum(p.numel() for p in net.parameters())
     try:
-        assert 100_000 < total_params < 500_000, f"Param count {total_params} seems off"
+        assert 100_000 < total_params < 1_000_000, f"Param count {total_params} seems off"
         print(f"✓ Test 2.6: Parameter count = {total_params:,} (reasonable range)")
         passed += 1
     except (AssertionError, Exception) as e:
@@ -2148,14 +2205,9 @@ def train_dqn_agent(policy_net, optimizer):
                 w_batch = torch.tensor(is_weights, dtype=torch.float32).to(DEVICE)
 
                 with torch.no_grad():
-                    # Double DQN: policy_net selects best action, target_net evaluates it
-                    # This reduces Q-value overestimation vs standard DQN
-                    policy_next_q = policy_net(ns_batch)
-                    masked_policy_q = policy_next_q.masked_fill(m_batch == 0, -1e9)
-                    best_actions = masked_policy_q.argmax(dim=1, keepdim=True)
-                    
-                    target_next_q = target_net(ns_batch)
-                    next_q_max = target_next_q.gather(1, best_actions).squeeze(1)
+                    next_q_values = target_net(ns_batch)
+                    masked_next_q = next_q_values.masked_fill(m_batch == 0, -1e9)
+                    next_q_max = masked_next_q.max(dim=1)[0]
                     target_q = r_batch - (GAMMA * next_q_max * (1 - d_batch))
 
                 optimizer.zero_grad()
@@ -2259,6 +2311,30 @@ def train_dqn_agent(policy_net, optimizer):
                             optimizer.state[p] = {}
                     eps = EPS_START
                     episodes_since_promotion = 0
+            
+            # 8. NEURON REINITIALIZATION (Sutton-style)
+            if REINIT_ENABLED and episode % REINIT_FREQUENCY == 0:
+                n_reinit = reinitialize_low_utility_neurons(policy_net, fraction=REINIT_FRACTION)
+                print(f"  🔄 Reinitialized {n_reinit} low-utility neurons")
+            
+            # 9. REFERENCE POLICY BENCHMARK (early stopping)
+            if (REFERENCE_POLICY_PATH and episode >= REFERENCE_MIN_EPISODES 
+                    and episode % CHAMPION_EVAL_FREQUENCY == 0):
+                if not hasattr(train_dqn_agent, '_ref_model'):
+                    train_dqn_agent._ref_model = torch.jit.load(
+                        REFERENCE_POLICY_PATH, map_location="cpu")
+                    train_dqn_agent._ref_model.eval()
+                
+                ref_wr, ref_w, ref_l = evaluate_challenger_vs_champion(
+                    policy_net, train_dqn_agent._ref_model,
+                    num_games=REFERENCE_EVAL_GAMES,
+                    temperature=CHAMPION_EVAL_TEMPERATURE
+                )
+                print(f"  📊 vs Reference: {ref_wr:.2f} ({ref_w}W/{ref_l}L)")
+                
+                if ref_wr < REFERENCE_MIN_WIN_RATE:
+                    print(f"  ⛔ HALTING: win rate vs reference ({ref_wr:.2f}) below threshold ({REFERENCE_MIN_WIN_RATE})")
+                    break
 
     print(f"\nTraining complete. Final champion: v{champion_version}")
     print(f"Champion history: {champion_history}")
