@@ -116,9 +116,9 @@ import matplotlib.pyplot as plt
 # *****************************************************************
 NUM_EPISODES                = 5000
 BATCH_SIZE                  = 128
-LEARNING_RATE               = 0.0003
+LEARNING_RATE               = 0.001
 WEIGHT_DECAY                = 1e-4
-TRAINING_ITERATIONS         = 2       # Training steps per game
+TRAINING_ITERATIONS         = 4       # Training steps per game
 EVAL_VS_RANDOM_GAME_COUNT   = 50
 GAMMA                       = 0.99
 EVALUATION_FREQUENCY        = 100     # Evaluate every N episodes
@@ -143,9 +143,9 @@ MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N e
 CHAMPION_DIR                = os.path.join(root_dir, "models")
 
 # Experiment Tracking (Step 14)
-EXPERIMENT_ID               = "ddqn_low_lr_5k"
-EXPERIMENT_HYPOTHESIS       = "Lower LR (0.0003 vs 0.001): baseline_5k and double_dqn_5k both showed threat Q oscillation (off_q peaked then regressed). Lower LR should give smoother convergence and better final threat Q values."
-EXPERIMENT_CHANGES          = "LEARNING_RATE=0.0003 (was 0.001), Double DQN retained"
+EXPERIMENT_ID               = "ddqn_4iter_5k"
+EXPERIMENT_HYPOTHESIS       = "More training iterations per game (4 vs 2): extract more learning from each self-play game. With Double DQN at LR=0.001. Low LR failed (ddqn_low_lr_5k tied baseline_1k), so keeping LR=0.001 and increasing gradient steps instead."
+EXPERIMENT_CHANGES          = "TRAINING_ITERATIONS=4 (was 2), LR reverted to 0.001"
 
 
 # *****************************************************************
