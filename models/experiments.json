@@ -213,7 +213,7 @@
     "id": "baseline_20k",
     "hypothesis": "Hero run: baseline config at 20K episodes. Data shows more episodes is the single biggest factor (1K\u21925K was 50-0 improvement). All 'clever' changes (Double DQN, low LR, more iterations, wider FC) failed to beat baseline_5k. Reverting to simplest config and scaling up.",
     "changes": "NUM_EPISODES=20000, reverted to standard DQN, FC=128, LR=0.001, 2 iterations",
-    "timestamp": "2026-04-11T00:56:05.709067",
+    "timestamp": "2026-04-11T01:28:46.286424",
     "episodes": 20000,
     "hyperparameters": {
       "batch_size": 128,
@@ -236,10 +236,10 @@
     },
     "results": {
       "final_win_rate_vs_random": 1.0,
-      "final_offensive_q": 0.8061147928237915,
-      "final_defensive_q": -0.6775131821632385,
-      "final_loss": 0.009579136036336422,
-      "unique_states": 73607,
+      "final_offensive_q": 0.7164949178695679,
+      "final_defensive_q": -0.7985387444496155,
+      "final_loss": 0.0032285195775330067,
+      "unique_states": 71729,
       "champion_file": "exp_baseline_20k/champion_current.pt"
     },
     "league_rank": null

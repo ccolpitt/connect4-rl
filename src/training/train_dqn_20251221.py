@@ -143,20 +143,23 @@ MAX_STAGNATION_EPISODES     = 1000    # Revert challenger if no promotion in N e
 CHAMPION_DIR                = os.path.join(root_dir, "models")
 
 # Neuron Reinitialization (Sutton-style continual backpropagation)
-REINIT_ENABLED              = False   # Set True to enable periodic neuron reinitialization
+REINIT_ENABLED              = True    # Set True to enable periodic neuron reinitialization
 REINIT_FREQUENCY            = 500     # Reinitialize every N episodes
 REINIT_FRACTION             = 0.1     # Fraction of lowest-utility neurons to reinitialize
 
 # Reference Policy Benchmark (early stopping for bad runs)
-REFERENCE_POLICY_PATH       = None    # Path to .pt file, or None to skip
+REFERENCE_POLICY_PATH       = "models/exp_baseline_5k/champion_current.pt"
 REFERENCE_EVAL_GAMES        = 50      # Games per reference evaluation
 REFERENCE_MIN_EPISODES      = 5000    # Don't check reference until this many episodes
 REFERENCE_MIN_WIN_RATE      = 0.45    # Halt if below this win rate after REFERENCE_MIN_EPISODES
 
+# Warm Start (load previous champion weights)
+WARM_START_PATH             = "models/exp_baseline_20k/champion_current.pt"
+
 # Experiment Tracking (Step 14)
-EXPERIMENT_ID               = "baseline_20k"
-EXPERIMENT_HYPOTHESIS       = "Hero run: baseline config at 20K episodes. Data shows more episodes is the single biggest factor (1K→5K was 50-0 improvement). All 'clever' changes (Double DQN, low LR, more iterations, wider FC) failed to beat baseline_5k. Reverting to simplest config and scaling up."
-EXPERIMENT_CHANGES          = "NUM_EPISODES=20000, reverted to standard DQN, FC=128, LR=0.001, 2 iterations"
+EXPERIMENT_ID               = "reinit_warm_20k"
+EXPERIMENT_HYPOTHESIS       = "Warm-start from baseline_20k champion + neuron reinitialization. The 20K run showed increasing dead neurons. Reinitializing lowest-utility neurons every 500 episodes should recycle dead capacity and allow continued improvement beyond the 20K plateau."
+EXPERIMENT_CHANGES          = "WARM_START_PATH=baseline_20k champion, REINIT_ENABLED=True, REINIT_FREQUENCY=500, REINIT_FRACTION=0.1, REFERENCE_POLICY=baseline_5k"
 
 
 # *****************************************************************
@@ -595,13 +598,32 @@ run_network_tests()
 policy_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
 target_net = Connect4Net(device=DEVICE, dropout_rate=DROPOUT_RATE)
 
+# Warm start: load previous champion weights if specified
+if WARM_START_PATH:
+    print(f"Warm-starting from: {WARM_START_PATH}")
+    warm_model = torch.jit.load(WARM_START_PATH, map_location="cpu")
+    warm_state = warm_model.state_dict()
+    # Map TorchScript state dict keys to our module keys
+    mapped_state = {}
+    for key, val in warm_state.items():
+        # TorchScript may prefix keys differently — try direct mapping first
+        if key in policy_net.state_dict():
+            mapped_state[key] = val.to(DEVICE)
+        else:
+            # Strip common TorchScript prefixes
+            clean_key = key.replace("__torch__.", "").replace("___torch_mangle_", "")
+            if clean_key in policy_net.state_dict():
+                mapped_state[clean_key] = val.to(DEVICE)
+    if mapped_state:
+        policy_net.load_state_dict(mapped_state, strict=False)
+        print(f"  Loaded {len(mapped_state)}/{len(policy_net.state_dict())} parameters from warm start")
+    else:
+        print(f"  ⚠ Could not map warm start weights — starting fresh")
+
 # Sync weights
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-# Simplified Optimizer
-#optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
-optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 optimizer = torch.optim.Adam(
     policy_net.parameters(), 
     lr=LEARNING_RATE, 
