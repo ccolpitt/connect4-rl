@@ -94,6 +94,8 @@ of the steps are complete, but please check.
     to try in step 14 as well.
 16: For usability, create a repository of agents.  Each agent should have a date and a description 
     to start with.  There should be a way to browse agents, load agents, and play against them.
+    There should be traceability between the agent, and the params and assumptions used to 
+    create it - basically a policy card.
 
 """
 
