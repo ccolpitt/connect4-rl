@@ -36,18 +36,19 @@ of the steps are complete, but please check.
 7: Test the play vs. human function.  Don't create a unit test because the human doesn't want
     to have to play every time we run the file, but test that this works once, so that you can
     have the human play a highly-trained agent.
-8: Implement training tracking
-    Avg Abs Q Value prediction
-    Avg Abs Q Value of Win/Loss position prediction (only where is_done = True)
-    NN Loss by training event
-    Win rate vs. random
-    Unique States Explored
-    Graph of abs(max(Q(state))), where x-axis is move since end.  First entry will always be
+8: Implement training tracking.  This should be a standard training "card" an llm could parse at a future
+    date to see what works, and what doesn't work.
+    - Avg Abs Q Value prediction
+    - Avg Abs Q Value of Win/Loss position prediction (only where is_done = True)
+    - NN Loss by training event --> we want to verify NN loss decreases as training progresses
+    - Win rate vs. random --> should hit 100%
+    - Unique States Explored --> should assymptotically hit state space.
+    - Graph of abs(max(Q(state))), where x-axis is move since end.  First entry will always be
         the final state.  The abs(max) should approach 1 for games where a player wins.
         initialize the vector of size 42 to zero.  Then each time we calculate the win vs. random
         agent, recalculate this vector.  Then, during training evaluation, verify that the 
         curves start to decrease from 1 to zero.  If this curve does not decline as training
-        continues, there is a problem.
+        continues, there is a problem. --> Verify NN is learning
 9: Test whether we are correctly implementing the negamax bellman update.  Do we correctly return
     the state from the current player's perspective?  Ie - I think we want to flip the state when
     we subtract off the max of the next Q values.  Note we may have already done this when 
@@ -73,11 +74,13 @@ of the steps are complete, but please check.
     a failed defensive move are close to -1.  Add this to the training set of metrics.  Take the
     average of the Q values of the winning moves for the offense situation, and the average of the
     Q values that fail to block in the defensive situation.  The winning move Q values should approach
-    1, and the failed defensive Q values should approach -1.  if they do not, something is wrong.
+    1, and the failed defensive Q values should approach -1.  if they do not, something is wrong.  Add this
+    to the standardized policy audit artifact that an agent can parse in the future.
 14: Iterate on training.  Run training on a sufficient number of games to yield a pretty good trained
-    agent.  this should mean promoting several new champion policies.  based on what you see, 
+    agent.  this should mean promoting several new champion policies.  Based on what you see, 
     hypothesize on what to improve, make the changes, and measure the results.  Anything in this
-    file is fair game to change.  You can change the policy network.  You can change hyper-params.
+    file is fair game to change, except for this header.  You can change the policy network.  
+    You can change hyper-params.
     You can decide to measure new things.  One thing you may not do is (1) change the environment, (2)
     use reward shaping, or (3) use MCTS.  You may not use knowledge of the game to cheat, and speed up how the Q
     values are learned.  The approach you figure out should generalize to other games and problems.
@@ -91,6 +94,13 @@ of the steps are complete, but please check.
     to try in step 14 as well.
 16: For usability, create a repository of agents.  Each agent should have a date and a description 
     to start with.  There should be a way to browse agents, load agents, and play against them.
+
+"""
+
+"""
+Scratch note zone for the LLM: Please add hypotheses to explore here.  When you have tested one, please
+document whether the hypothesis worked or not, so a future instance of the agent knows what worked.
+
 
 """
 

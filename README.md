@@ -3,7 +3,7 @@ Explore Reinforcement Learning via the connect 4 game.  Goal is to implement goo
 
 # Connect 4 Reinforcement Learning
 
-A comprehensive implementation of multiple reinforcement learning algorithms applied to Connect 4.
+An implementation of multiple reinforcement learning algorithms applied to Connect 4.
 
 ## Algorithms Implemented ( or at least attempted ) 
 
